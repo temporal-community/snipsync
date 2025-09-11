@@ -25,6 +25,9 @@ const progress = require("cli-progress");
 const glob = require("glob");
 const { type } = require("os");
 
+// Deindenting dependencies
+const { deindentByCommonPrefix, SENSITIVE_INDENT_EXTS } = require("./deindent");
+
 // Convert dependency functions to return promises
 const writeAsync = promisify(writeFile);
 const unlinkAsync = promisify(unlink);
@@ -56,10 +59,20 @@ class Snippet {
       lines.push(textline);
     }
     if (config.select !== undefined) {
-      const selectedLines = selectLines(config.select, this.lines, this.ext);
+      let selectedLines = selectLines(config.select, this.lines, this.ext);
+
+      if (!SENSITIVE_INDENT_EXTS.has(this.ext) &&selectedLines.length) {
+        selectedLines = deindentByCommonPrefix(selectedLines);
+      }
       lines.push(...selectedLines);
     } else if(!config.startPattern && !config.endPattern ) {
-      lines.push(...this.lines);
+      let snippetLines = [...this.lines];
+
+      if (!SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
+        snippetLines = deindentByCommonPrefix(snippetLines);
+      }
+
+      lines.push(...snippetLines);
     } else {
       // use the patterns to grab the content specified.
 
@@ -67,10 +80,15 @@ class Snippet {
       const match = this.lines.join("\n").match(pattern);
 
       if (match !== null) {
-        let filteredLines = match[1].split("\n");
-        lines.push(...filteredLines);
+        let snippetLines = match[1].split("\n");
+
+        if (!SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
+          snippetLines = deindentByCommonPrefix(snippetLines);
+        }
+
+        lines.push(...snippetLines);
+        }
       }
-    }
 
     if (config.enable_code_block) {
       lines.push(markdownCodeTicks);
