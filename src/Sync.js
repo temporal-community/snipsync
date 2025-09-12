@@ -15,7 +15,6 @@ const {
   writeEnd,
 } = require("./common");
 const { writeFile, unlink } = require("fs");
-const dedent = require("dedent");
 const path = require("path");
 const arrayBuffToBuff = require("arraybuffer-to-buffer");
 const anzip = require("anzip");
@@ -59,16 +58,17 @@ class Snippet {
       lines.push(textline);
     }
     if (config.select !== undefined) {
-      let selectedLines = selectLines(config.select, this.lines, this.ext);
+      let snippetLines = selectLines(config.select, this.lines, this.ext);
 
-      if (!SENSITIVE_INDENT_EXTS.has(this.ext) &&selectedLines.length) {
-        selectedLines = deindentByCommonPrefix(selectedLines);
+      if (config.enable_code_dedenting && !SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
+        snippetLines = deindentByCommonPrefix(snippetLines);
       }
-      lines.push(...selectedLines);
+
+      lines.push(...snippetLines);
     } else if(!config.startPattern && !config.endPattern ) {
       let snippetLines = [...this.lines];
 
-      if (!SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
+      if (config.enable_code_dedenting && !SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
         snippetLines = deindentByCommonPrefix(snippetLines);
       }
 
@@ -82,7 +82,7 @@ class Snippet {
       if (match !== null) {
         let snippetLines = match[1].split("\n");
 
-        if (!SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
+        if (config.enable_code_dedenting && !SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
           snippetLines = deindentByCommonPrefix(snippetLines);
         }
 
@@ -154,13 +154,8 @@ class File {
     this.lines = [];
   }
   // fileString converts the array of lines into a string
-  fileString(dedentCode = false) {
+  fileString() {
     let lines = `${this.lines.join("\n")}\n`;
-
-    if (dedentCode) {
-      lines = dedent(lines);
-    }
-
     return lines;
   }
 }
@@ -485,7 +480,7 @@ class Sync {
     for (const file of files) {
       await writeAsync(
         file.fullpath,
-        file.fileString(this.config.features.enable_code_dedenting)
+        file.fileString()
       );
       this.progress.increment();
     }
@@ -548,15 +543,24 @@ function extractWriteIDAndConfig(line) {
 function overwriteConfig(current, extracted) {
   let config = {};
 
-  config.enable_source_link =
-    extracted?.enable_source_link ?? true
-      ? current.enable_source_link
-      : extracted.enable_source_link;
+  // use snippet override if present, otherwise use global default
+  if (extracted && 'enable_source_link' in extracted) {
+    config.enable_source_link = extracted.enable_source_link;
+  } else {
+    config.enable_source_link = current.enable_source_link;
+  }
 
-  config.enable_code_block =
-    extracted?.enable_code_block ?? true
-      ? current.enable_code_block
-      : extracted.enable_code_block;
+  if (extracted && 'enable_code_block' in extracted) {
+    config.enable_code_block = extracted.enable_code_block;
+  } else {
+    config.enable_code_block = current.enable_code_block;
+  }
+
+  if (extracted && 'enable_code_dedenting' in extracted) {
+    config.enable_code_dedenting = extracted.enable_code_dedenting;
+  } else {
+    config.enable_code_dedenting = current.enable_code_dedenting || false;
+  }
 
   if (extracted?.highlightedLines ?? undefined) {
     config.highlights = extracted.highlightedLines;

@@ -158,54 +158,57 @@ test('uses regex patterns to pare down snippet inserted into a file', async() =>
   
 });
 
-test('Do not dedent snippets when option is false', async() => {
+test('No dedent when option is false (snippet stays indented; other content unchanged)', async () => {
+  fs.copyFileSync(`${fixturesPath}/dedent.md`, `${testEnvPath}/dedent.md`);
 
-  fs.copyFileSync(`${fixturesPath}/dedent.md`,`${testEnvPath}/dedent.md`);
-
-  cfg.origins = [
-    { owner: 'temporalio', repo: 'samples-typescript' },
-  ];
-
+  cfg.origins = [{ owner: 'temporalio', repo: 'samples-typescript' }];
   cfg.features.enable_code_dedenting = false;
 
   const synctron = new Sync(cfg, logger);
   await synctron.run();
 
-  let data = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
-  data = data.split("\n");
+  const text = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
 
-  /*
-   * The code will start on the 4th line, as the 1st is the comment, second is the file link
-   * and the third is the code fence.
-   * The fourth line should have two spaces on the first line, as they should not be stripped.
-   */
-  expect(data[3]).toMatch(/^\s\s/);
+  // Grab the first code block’s first line
+  const m = text.match(/```[^\n]*\n([\s\S]*?)\n```/);
+  expect(m).toBeTruthy();
+  const firstCodeLine = m[1].split('\n')[0];
 
+  // With dedent OFF, snippet should still start with two spaces
+  expect(firstCodeLine).toMatch(/^\s{2}\S/);
+
+  // Prose paragraph stays flush-left
+  expect(text).toMatch(/\nFor example, this paragraph starts at flush-left\./);
+
+  // Nested list item keeps its two leading spaces
+  expect(text).toMatch(/\n  - For example, this list item on another level/);
 });
 
-test('Dedent snippets when option is set', async() => {
+test('Dedent when option is true (should only affect snippet; OTHER CONTENT UNCHANGED)', async () => {
+  fs.copyFileSync(`${fixturesPath}/dedent.md`, `${testEnvPath}/dedent.md`);
 
-  fs.copyFileSync(`${fixturesPath}/dedent.md`,`${testEnvPath}/dedent.md`);
-
-  cfg.origins = [
-    { owner: 'temporalio', repo: 'samples-typescript' },
-  ];
-
+  cfg.origins = [{ owner: 'temporalio', repo: 'samples-typescript' }];
   cfg.features.enable_code_dedenting = true;
 
   const synctron = new Sync(cfg, logger);
   await synctron.run();
 
-  let data = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
-  data = data.split("\n");
+  const text = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
 
-  /*
-   * The code will start on the 4th line, as the 1st is the comment, second is the file link
-   * and the third is the code fence.
-   * The fourth line should NOT have two spaces at the start of the line, as they should be stripped.
-   */
-  expect(data[3]).not.toMatch(/^\s/);
+  const m = text.match(/```[^\n]*\n([\s\S]*?)\n```/);
+  expect(m).toBeTruthy();
+  const firstCodeLine = m[1].split('\n')[0];
 
+  // EXPECTED (desired behavior): snippet becomes flush-left
+  expect(firstCodeLine).toMatch(/^\S/);
+
+  // EXPECTED (desired behavior): prose unchanged
+  expect(text).toMatch(/\nFor example, this paragraph starts at flush-left\./);
+
+  // EXPECTED (desired behavior): nested list item should remain indented
+  // This is what will FAIL with the current file-level dedent implementation,
+  // since it also strips indentation from list lines.
+  expect(text).toMatch(/\n  - For example, this list item on another level/);
 });
 
 test('Per snippet selectedLines configuration', async() => {
