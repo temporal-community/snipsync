@@ -42,7 +42,7 @@ describe('deindentByCommonPrefix', () => {
     const output = deindentByCommonPrefix(input);
     expect(output).toEqual([
       '});',           // unchanged
-      'doSomething();' // dedented
+      'doSomething();', // dedented
     ]);
   });
 
