@@ -181,7 +181,7 @@ test('No dedent when option is false (snippet stays indented; other content unch
   expect(text).toMatch(/\nFor example, this paragraph starts at flush-left\./);
 
   // Nested list item keeps its two leading spaces
-  expect(text).toMatch(/\n  - For example, this list item on another level/);
+  expect(text).toMatch(/\n\s{2}- For example, this list item on another level/);
 });
 
 test('Dedent when option is true (should only affect snippet; OTHER CONTENT UNCHANGED)', async () => {
@@ -208,7 +208,7 @@ test('Dedent when option is true (should only affect snippet; OTHER CONTENT UNCH
   // EXPECTED (desired behavior): nested list item should remain indented
   // This is what will FAIL with the current file-level dedent implementation,
   // since it also strips indentation from list lines.
-  expect(text).toMatch(/\n  - For example, this list item on another level/);
+  expect(text).toMatch(/\n\s{2}- For example, this list item on another level/);
 });
 
 test('Per snippet selectedLines configuration', async() => {
