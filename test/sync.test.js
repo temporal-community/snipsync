@@ -158,55 +158,138 @@ test('uses regex patterns to pare down snippet inserted into a file', async() =>
   
 });
 
-test('Do not dedent snippets when option is false', async() => {
+test('Dedent keeps relative indentation inside the snippet', async () => {
+  fs.copyFileSync(`${fixturesPath}/dedent.md`, `${testEnvPath}/dedent.md`);
 
-  fs.copyFileSync(`${fixturesPath}/dedent.md`,`${testEnvPath}/dedent.md`);
-
-  cfg.origins = [
-    { owner: 'temporalio', repo: 'samples-typescript' },
-  ];
-
-  cfg.features.enable_code_dedenting = false;
-
-  const synctron = new Sync(cfg, logger);
-  await synctron.run();
-
-  let data = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
-  data = data.split("\n");
-
-  /*
-   * The code will start on the 4th line, as the 1st is the comment, second is the file link
-   * and the third is the code fence.
-   * The fourth line should have two spaces on the first line, as they should not be stripped.
-   */
-  expect(data[3]).toMatch(/^\s\s/);
-
-});
-
-test('Dedent snippets when option is set', async() => {
-
-  fs.copyFileSync(`${fixturesPath}/dedent.md`,`${testEnvPath}/dedent.md`);
-
-  cfg.origins = [
-    { owner: 'temporalio', repo: 'samples-typescript' },
-  ];
-
+  cfg.origins = [{ owner: 'temporalio', repo: 'samples-typescript' }];
   cfg.features.enable_code_dedenting = true;
 
   const synctron = new Sync(cfg, logger);
   await synctron.run();
 
-  let data = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
-  data = data.split("\n");
+  const text = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
 
-  /*
-   * The code will start on the 4th line, as the 1st is the comment, second is the file link
-   * and the third is the code fence.
-   * The fourth line should NOT have two spaces at the start of the line, as they should be stripped.
-   */
-  expect(data[3]).not.toMatch(/^\s/);
+  // Grab the first fenced code block contents
+  const m = text.match(/```[^\n]*\n([\s\S]*?)\n```/);
+  expect(m).toBeTruthy();
 
+  const bodyLines = m[1].split('\n').filter(l => l.length > 0);
+  const indents = bodyLines.map(l => (l.match(/^[ \t]*/)?.[0].length ?? 0));
+  const minIndent = Math.min(...indents);
+
+  // With dedent enabled, the common left padding is removed:
+  expect(minIndent).toBe(0);
+
+  // But relative indentation remains for inner lines (at least one line still indented):
+  expect(bodyLines.some(l => /^[ \t]+\S/.test(l))).toBe(true);
 });
+
+test('Regex-selected regions are dedented after start/end pattern slicing', async () => {
+  fs.copyFileSync(`${fixturesPath}/regex_index.md`, `${testEnvPath}/regex_index.md`);
+
+  cfg.origins = [
+    { owner: 'temporalio', repo: 'money-transfer-project-template-go' },
+    { owner: 'temporalio', repo: 'samples-typescript' },
+  ];
+  cfg.features.enable_code_dedenting = true;
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const text = fs.readFileSync(`${testEnvPath}/regex_index.md`, 'utf8');
+
+  // First fenced block (per your fixture)
+  const m = text.match(/```[^\n]*\n([\s\S]*?)\n```/);
+  expect(m).toBeTruthy();
+  const bodyLines = m[1].split('\n').filter(l => l.length > 0);
+  const indents = bodyLines.map(l => (l.match(/^[ \t]*/)?.[0].length ?? 0));
+  const minIndent = Math.min(...indents);
+
+  // After slicing by start/end patterns, we still dedent the selected region:
+  expect(minIndent).toBe(0);
+
+  // Keep original regex expectations for content sanity
+  expect(text).not.toMatch(/import type \* as activities/);
+  expect(text).toMatch(/const \{ greet/);
+  expect(text).not.toMatch(/export async function example/);
+});
+
+test('No dedent when option is false (snippet stays indented; other content unchanged)', async () => {
+  fs.copyFileSync(`${fixturesPath}/dedent.md`, `${testEnvPath}/dedent.md`);
+
+  cfg.origins = [{ owner: 'temporalio', repo: 'samples-typescript' }];
+  cfg.features.enable_code_dedenting = false;
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const text = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
+
+  // Grab the first code block’s first line
+  const m = text.match(/```[^\n]*\n([\s\S]*?)\n```/);
+  expect(m).toBeTruthy();
+  const firstCodeLine = m[1].split('\n')[0];
+
+  // With dedent OFF, snippet should still start with two spaces
+  expect(firstCodeLine).toMatch(/^\s{2}\S/);
+
+  // Prose paragraph stays flush-left
+  expect(text).toMatch(/\nFor example, this paragraph starts at flush-left\./);
+
+  // Nested list item keeps its two leading spaces
+  expect(text).toMatch(/\n\s{2}- For example, this list item on another level/);
+});
+
+test('Dedent when option is true (should only affect snippet; OTHER CONTENT UNCHANGED)', async () => {
+  fs.copyFileSync(`${fixturesPath}/dedent.md`, `${testEnvPath}/dedent.md`);
+
+  cfg.origins = [{ owner: 'temporalio', repo: 'samples-typescript' }];
+  cfg.features.enable_code_dedenting = true;
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const text = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
+
+  const m = text.match(/```[^\n]*\n([\s\S]*?)\n```/);
+  expect(m).toBeTruthy();
+  const firstCodeLine = m[1].split('\n')[0];
+
+  // EXPECTED (desired behavior): snippet becomes flush-left
+  expect(firstCodeLine).toMatch(/^\S/);
+
+  // EXPECTED (desired behavior): prose unchanged
+  expect(text).toMatch(/\nFor example, this paragraph starts at flush-left\./);
+
+  // EXPECTED (desired behavior): nested list item should remain indented
+  // This is what will FAIL with the current file-level dedent implementation,
+  // since it also strips indentation from list lines.
+  expect(text).toMatch(/\n\s{2}- For example, this list item on another level/);
+});
+
+test('Dedent works without fences (enable_code_block=false)', async () => {
+  fs.copyFileSync(`${fixturesPath}/dedent.md`, `${testEnvPath}/dedent.md`);
+
+  cfg.origins = [{ owner: 'temporalio', repo: 'samples-typescript' }];
+  cfg.features.enable_code_block = false;     // no ```
+  cfg.features.enable_code_dedenting = true;  // dedent ON
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const text = fs.readFileSync(`${testEnvPath}/dedent.md`, 'utf8');
+
+  // Extract snippet region between markers (simple, inline)
+  const m = text.match(/<!--SNIPSTART[\s\S]*?-->\n([\s\S]*?)\n<!--SNIPEND-->/);
+  expect(m).toBeTruthy();
+  const bodyLines = m[1].split('\n').filter(l => l.length > 0);
+
+  // Same invariants: min indent is 0; at least one line still indented
+  const indents = bodyLines.map(l => (l.match(/^[ \t]*/)?.[0].length ?? 0));
+  expect(Math.min(...indents)).toBe(0);
+  expect(bodyLines.some(l => /^[ \t]+\S/.test(l))).toBe(true);
+});
+
 
 test('Per snippet selectedLines configuration', async() => {
 

@@ -15,7 +15,6 @@ const {
   writeEnd,
 } = require("./common");
 const { writeFile, unlink } = require("fs");
-const dedent = require("dedent");
 const path = require("path");
 const arrayBuffToBuff = require("arraybuffer-to-buffer");
 const anzip = require("anzip");
@@ -24,6 +23,9 @@ const rimraf = require("rimraf");
 const progress = require("cli-progress");
 const glob = require("glob");
 const { type } = require("os");
+
+// Deindenting dependencies
+const { deindentByCommonPrefix, SENSITIVE_INDENT_EXTS } = require("./deindent");
 
 // Convert dependency functions to return promises
 const writeAsync = promisify(writeFile);
@@ -56,10 +58,21 @@ class Snippet {
       lines.push(textline);
     }
     if (config.select !== undefined) {
-      const selectedLines = selectLines(config.select, this.lines, this.ext);
-      lines.push(...selectedLines);
+      let snippetLines = selectLines(config.select, this.lines, this.ext);
+
+      if (config.enable_code_dedenting && !SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
+        snippetLines = deindentByCommonPrefix(snippetLines);
+      }
+
+      lines.push(...snippetLines);
     } else if(!config.startPattern && !config.endPattern ) {
-      lines.push(...this.lines);
+      let snippetLines = [...this.lines];
+
+      if (config.enable_code_dedenting && !SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
+        snippetLines = deindentByCommonPrefix(snippetLines);
+      }
+
+      lines.push(...snippetLines);
     } else {
       // use the patterns to grab the content specified.
 
@@ -67,10 +80,15 @@ class Snippet {
       const match = this.lines.join("\n").match(pattern);
 
       if (match !== null) {
-        let filteredLines = match[1].split("\n");
-        lines.push(...filteredLines);
+        let snippetLines = match[1].split("\n");
+
+        if (config.enable_code_dedenting && !SENSITIVE_INDENT_EXTS.has(this.ext) && snippetLines.length) {
+          snippetLines = deindentByCommonPrefix(snippetLines);
+        }
+
+        lines.push(...snippetLines);
+        }
       }
-    }
 
     if (config.enable_code_block) {
       lines.push(markdownCodeTicks);
@@ -136,13 +154,8 @@ class File {
     this.lines = [];
   }
   // fileString converts the array of lines into a string
-  fileString(dedentCode = false) {
+  fileString() {
     let lines = `${this.lines.join("\n")}\n`;
-
-    if (dedentCode) {
-      lines = dedent(lines);
-    }
-
     return lines;
   }
 }
@@ -467,7 +480,7 @@ class Sync {
     for (const file of files) {
       await writeAsync(
         file.fullpath,
-        file.fileString(this.config.features.enable_code_dedenting)
+        file.fileString()
       );
       this.progress.increment();
     }
@@ -530,15 +543,24 @@ function extractWriteIDAndConfig(line) {
 function overwriteConfig(current, extracted) {
   let config = {};
 
-  config.enable_source_link =
-    extracted?.enable_source_link ?? true
-      ? current.enable_source_link
-      : extracted.enable_source_link;
+  // use snippet override if present, otherwise use global default
+  if (extracted && 'enable_source_link' in extracted) {
+    config.enable_source_link = extracted.enable_source_link;
+  } else {
+    config.enable_source_link = current.enable_source_link;
+  }
 
-  config.enable_code_block =
-    extracted?.enable_code_block ?? true
-      ? current.enable_code_block
-      : extracted.enable_code_block;
+  if (extracted && 'enable_code_block' in extracted) {
+    config.enable_code_block = extracted.enable_code_block;
+  } else {
+    config.enable_code_block = current.enable_code_block;
+  }
+
+  if (extracted && 'enable_code_dedenting' in extracted) {
+    config.enable_code_dedenting = extracted.enable_code_dedenting;
+  } else {
+    config.enable_code_dedenting = current.enable_code_dedenting || false;
+  }
 
   if (extracted?.highlightedLines ?? undefined) {
     config.highlights = extracted.highlightedLines;
