@@ -406,16 +406,14 @@ class Sync {
   let lookForStop = false;
   let spliceStart = 0;
   let config;
-  let currentStyleIdx; // NEW: remember which style opened
+  let currentStyleIdx; // track style of the opener we matched
 
   for (let [idx, _] of staticFile.lines.entries()) {
     const line = file.lines[idx];
 
-    // OPEN: try all styles
     if (!lookForStop) {
       const parsed = parseWriteStartAny(line);
       if (parsed && parsed.id === snippet.id) {
-        // Optional source match check (unchanged)
         if (parsed.source) {
           const snippetPath = (snippet.filePath.directory.split('/').slice(1).join('/') + snippet.filePath.name);
           const repoPath = ("https://github.com/" + snippet.owner + "/" + snippet.repo + "/" + snippetPath);
@@ -427,25 +425,45 @@ class Sync {
         config = overwriteConfig(this.config.features, parsed.config);
         spliceStart = fileLineNumber;
         lookForStop = true;
-        currentStyleIdx = parsed.styleIdx; // 🔒 remember which style to close with
+        currentStyleIdx = parsed.styleIdx;
       }
     } else {
-      // CLOSE: must match the same style
-      if (isWriteEndForStyle(line, currentStyleIdx)) {
-        dynamicFile = await this.spliceFile(
-          spliceStart,
-          fileLineNumber,
-          snippet,
-          dynamicFile,
-          config
-        );
-        lookForStop = false;
-        currentStyleIdx = undefined;
+      // We are inside a candidate region — look for ANY end token on this line
+      const seenEndIdx = endStyleIdx(line);
+      if (seenEndIdx !== -1) {
+        if (seenEndIdx !== currentStyleIdx) {
+          // Mismatched end → warn & bail (do NOT splice, reset state)
+          this.logger.warn(
+            `snipsync: mismatched end marker at line ${fileLineNumber} in ${file.fullpath} (opened as style ${currentStyleIdx}, saw end style ${seenEndIdx}). Skipping splice for snippet "${snippet.id}".`
+          );
+          lookForStop = false;
+          currentStyleIdx = undefined;
+          // fall through; keep scanning (a new, correct start may appear later)
+        } else {
+          // Proper close → do the splice
+          dynamicFile = await this.spliceFile(
+            spliceStart,
+            fileLineNumber,
+            snippet,
+            dynamicFile,
+            config
+          );
+          lookForStop = false;
+          currentStyleIdx = undefined;
+        }
       }
     }
 
     fileLineNumber++;
   }
+
+  if (lookForStop) {
+    // EOF with no matching end — bail noisily, no changes applied
+    this.logger.warn(
+      `snipsync: unterminated snippet region for "${snippet.id}" in ${file.fullpath} (opened style ${currentStyleIdx}, no matching end before EOF).`
+    );
+  }
+
   return dynamicFile;
 }
 
@@ -467,29 +485,71 @@ class Sync {
   }
   // getClearedFile removes snippet lines from a specific file
   async getClearedFile(file) {
-  let omit = false;
+  let omitting = false;
   let openedStyleIdx;
   const out = [];
 
+  // Buffer all lines inside a candidate region so we can restore them on mismatch
+  let startLine = null;   // we keep the START marker itself (per your current behavior)
+  let buffer = [];        // lines between start and end (snippet content)
+
+  const flushBufferKeepAll = (lineIfAny) => {
+    if (startLine !== null) out.push(startLine);
+    for (const l of buffer) out.push(l);
+    if (lineIfAny) out.push(lineIfAny); // e.g., mismatched end line treated as normal content
+    startLine = null;
+    buffer = [];
+  };
+
   for (const line of file.lines) {
-    if (!omit) {
+    if (!omitting) {
       const parsed = parseWriteStartAny(line);
       if (parsed) {
-        omit = true;
+        // Begin candidate region; keep the start marker
+        omitting = true;
         openedStyleIdx = parsed.styleIdx;
-        out.push(line);       // KEEP the START marker
+        startLine = line;
+        buffer = [];
         continue;
       }
       out.push(line);
     } else {
-      if (isWriteEndForStyle(line, openedStyleIdx)) {
-        omit = false;
-        openedStyleIdx = undefined;
-        out.push(line);       // KEEP the END marker
-        continue;
+      // We are inside a candidate region (candidate to clear)
+      const seenEndIdx = endStyleIdx(line);
+      if (seenEndIdx !== -1) {
+        if (seenEndIdx !== openedStyleIdx) {
+          // Mismatched end: warn and bail — restore everything seen so far and treat this line as normal content
+          this.logger.warn(
+            `snipsync: mismatched end marker while clearing ${file.fullpath} (opened as style ${openedStyleIdx}, saw end style ${seenEndIdx}). Region preserved.`
+          );
+          flushBufferKeepAll(line);
+          omitting = false;
+          openedStyleIdx = undefined;
+        } else {
+          // Proper close: drop the buffered snippet content, keep the end marker
+          if (startLine !== null) out.push(startLine);  // keep start
+          // (intentionally NOT pushing buffer)
+          out.push(line);                               // keep end
+          startLine = null;
+          buffer = [];
+          omitting = false;
+          openedStyleIdx = undefined;
+        }
+      } else {
+        // Not an end marker; just buffer the line for now
+        buffer.push(line);
       }
-      // omit snippet lines
     }
+  }
+
+  // EOF while still omitting → unterminated region: restore everything
+  if (omitting) {
+    this.logger.warn(
+      `snipsync: unterminated snippet region while clearing ${file.fullpath} (opened style ${openedStyleIdx}, no matching end before EOF). Region preserved.`
+    );
+    flushBufferKeepAll(null);
+    omitting = false;
+    openedStyleIdx = undefined;
   }
 
   file.lines = out;
@@ -568,6 +628,15 @@ function isWriteEndForStyle(line, styleIdx) {
   const token = writeMarkerStyles[styleIdx].end;
   return line.includes(token);
 }
+
+function endStyleIdx(line) {
+  // returns the styleIdx of the end token if this line contains one; else -1
+  for (let i = 0; i < writeMarkerStyles.length; i++) {
+    if (line.includes(writeMarkerStyles[i].end)) return i;
+  }
+  return -1;
+}
+
 
 // extractReadID uses regex to exract the id from a string
 function extractReadID(line) {

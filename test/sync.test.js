@@ -483,3 +483,73 @@ const nope = 2;
   expect(crossBody2).not.toMatch(/```/);
   expect(crossBody2).not.toMatch(/const nope = 2;/);
 });
+
+test('Clear preserves content on mismatched end (warn & bail)', async () => {
+  const srcPath = `${testEnvPath}/src3.ts`;
+  fs.writeFileSync(srcPath, `// @@@SNIPSTART foo\nconst x = 1;\n// @@@SNIPEND\n`);
+
+  const mdxPath = `${testEnvPath}/mismatch_clear.mdx`;
+  fs.writeFileSync(mdxPath, `<!--SNIPSTART foo -->\nsome text\n{/* SNIPEND */}\n`);
+
+  cfg.origins = [{ files: { pattern: srcPath, owner: 'temporalio', repo: 'snipsync', ref: 'main' } }];
+  cfg.features.allowed_target_extensions = ['.mdx'];
+  cfg.features.enable_code_block = true;
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.clear();
+
+  const out = fs.readFileSync(mdxPath, 'utf8');
+
+  // Region preserved (markers + inner content)
+  expect(out).toMatch(/<!--\s*SNIPSTART\s+foo\s*-->/);
+  expect(out).toMatch(/some text/);
+  expect(out).toMatch(/\{\/\*\s*SNIPEND\s*\*\/\}/);
+});
+
+test('Splice warns and does not modify on mismatched end', async () => {
+  // Arrange: source file with a snippet
+  const srcPath = `${testEnvPath}/src-mismatch.ts`;
+  fs.writeFileSync(
+    srcPath,
+    `// @@@SNIPSTART foo\nexport const val = 42;\n// @@@SNIPEND\n`
+  );
+
+  // Target doc with HTML start but JSX end (mismatched styles)
+  const targetPath = `${testEnvPath}/mismatch_splice.mdx`;
+  fs.writeFileSync(
+    targetPath,
+    `<!--SNIPSTART foo -->\nPLACEHOLDER\n{/* SNIPEND */}\n`
+  );
+
+  cfg.origins = [
+    {
+      files: {
+        pattern: srcPath,
+        owner: 'temporalio',
+        repo: 'snipsync',
+        ref: 'main',
+      },
+    },
+  ];
+  cfg.targets = [testEnvPath];
+  cfg.features.enable_code_block = true;
+
+  // Spy on logger.warn
+  const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+
+  // Act
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  // Assert: the mismatched region remains unchanged (no code spliced in)
+  const out = fs.readFileSync(targetPath, 'utf8');
+  expect(out).toContain('<!--SNIPSTART foo -->');
+  expect(out).toContain('PLACEHOLDER');
+  expect(out).toContain('{/* SNIPEND */}');
+
+  // And we should have logged a warning about the mismatch
+  expect(warnSpy).toHaveBeenCalled();
+
+  // Cleanup spy
+  warnSpy.mockRestore();
+});
