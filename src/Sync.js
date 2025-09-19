@@ -10,9 +10,7 @@ const {
   readStart,
   readEnd,
   rootDir,
-  writeStart,
-  writeStartClose,
-  writeEnd,
+  writeMarkerStyles
 } = require("./common");
 const { writeFile, unlink } = require("fs");
 const path = require("path");
@@ -402,30 +400,38 @@ class Sync {
   }
   // getSplicedFile returns the the spliced file
   async getSplicedFile(snippet, file) {
-    const staticFile = file;
-    let dynamicFile = file;
-    let fileLineNumber = 1;
-    let lookForStop = false;
-    let spliceStart = 0;
-    let config;
-    for (let [idx, _] of staticFile.lines.entries()) {
-      const line = file.lines[idx];
-      if (line.includes(writeStart)) {
-        const extracted = extractWriteIDAndConfig(line);
-        if (extracted.id === snippet.id) {
-          if (extracted.source) {
-            var snippetPath = (snippet.filePath.directory.split('/').slice(1).join('/') + snippet.filePath.name);
-            var repoPath = ("https://github.com/" + snippet.owner + "/" + snippet.repo + "/" + snippetPath);
-            if (extracted.source.slice(1) != repoPath) {
-              continue;
-            }
+  const staticFile = file;
+  let dynamicFile = file;
+  let fileLineNumber = 1;
+  let lookForStop = false;
+  let spliceStart = 0;
+  let config;
+  let currentStyleIdx; // NEW: remember which style opened
+
+  for (let [idx, _] of staticFile.lines.entries()) {
+    const line = file.lines[idx];
+
+    // OPEN: try all styles
+    if (!lookForStop) {
+      const parsed = parseWriteStartAny(line);
+      if (parsed && parsed.id === snippet.id) {
+        // Optional source match check (unchanged)
+        if (parsed.source) {
+          const snippetPath = (snippet.filePath.directory.split('/').slice(1).join('/') + snippet.filePath.name);
+          const repoPath = ("https://github.com/" + snippet.owner + "/" + snippet.repo + "/" + snippetPath);
+          if (parsed.source.slice(1) !== repoPath) {
+            fileLineNumber++;
+            continue;
           }
-          config = overwriteConfig(this.config.features, extracted.config);
-          spliceStart = fileLineNumber;
-          lookForStop = true;
         }
+        config = overwriteConfig(this.config.features, parsed.config);
+        spliceStart = fileLineNumber;
+        lookForStop = true;
+        currentStyleIdx = parsed.styleIdx; // 🔒 remember which style to close with
       }
-      if (line.includes(writeEnd) && lookForStop) {
+    } else {
+      // CLOSE: must match the same style
+      if (isWriteEndForStyle(line, currentStyleIdx)) {
         dynamicFile = await this.spliceFile(
           spliceStart,
           fileLineNumber,
@@ -434,11 +440,15 @@ class Sync {
           config
         );
         lookForStop = false;
+        currentStyleIdx = undefined;
       }
-      fileLineNumber++;
     }
-    return dynamicFile;
+
+    fileLineNumber++;
   }
+  return dynamicFile;
+}
+
   // spliceFile merges an individual snippet into the file
   async spliceFile(start, end, snippet, file, config) {
     const rmlines = end - start;
@@ -457,22 +467,35 @@ class Sync {
   }
   // getClearedFile removes snippet lines from a specific file
   async getClearedFile(file) {
-    let omit = false;
-    const newFileLines = [];
-    for (const line of file.lines) {
-      if (line.includes(writeEnd)) {
-        omit = false;
-      }
-      if (!omit) {
-        newFileLines.push(line);
-      }
-      if (line.includes(writeStart)) {
+  let omit = false;
+  let openedStyleIdx;
+  const out = [];
+
+  for (const line of file.lines) {
+    if (!omit) {
+      const parsed = parseWriteStartAny(line);
+      if (parsed) {
         omit = true;
+        openedStyleIdx = parsed.styleIdx;
+        out.push(line);       // KEEP the START marker
+        continue;
       }
+      out.push(line);
+    } else {
+      if (isWriteEndForStyle(line, openedStyleIdx)) {
+        omit = false;
+        openedStyleIdx = undefined;
+        out.push(line);       // KEEP the END marker
+        continue;
+      }
+      // omit snippet lines
     }
-    file.lines = newFileLines;
-    return file;
   }
+
+  file.lines = out;
+  return file;
+}
+
   // writeFiles writes file lines to target files
   async writeFiles(files) {
     this.progress.updateOperation("writing updated files");
@@ -511,32 +534,45 @@ const readMatchRegexp = new RegExp(
   escapeStringRegexp(readStart) + /\s+(\S+)/.source
 );
 
-const writeMatchRegexp = new RegExp(
-  escapeStringRegexp(writeStart) +
-    /\s+(\S+)\s*(@https:\/\/(?:www)?github\.com[/A-Za-z0-9-_.]+)?\s*(?:\s+(.+))?\s*/.source +
-    escapeStringRegexp(writeStartClose)
-);
+
+// Build an opening marker regex for a given style.
+function buildWriteStartRegexp(style) {
+  // Matches:
+  //   <openStart> <id> [@https://github.com/...optional-source] [<json options>] <openClose>
+  const middle = /\s+(\S+)\s*(@https:\/\/(?:www)?github\.com[/A-Za-z0-9-_.]+)?\s*(?:\s+(.+))?\s*/.source;
+  return new RegExp(
+    escapeStringRegexp(style.openStart) + middle + escapeStringRegexp(style.openClose)
+  );
+}
+
+// Try every style; if one matches, return parsed fields + style index.
+function parseWriteStartAny(line) {
+  for (let i = 0; i < writeMarkerStyles.length; i++) {
+    const re = buildWriteStartRegexp(writeMarkerStyles[i]);
+    const m = line.match(re);
+    if (m) {
+      let config = undefined;
+      try {
+        config = m[3] ? JSON.parse(m[3]) : undefined;
+      } catch {
+        console.error(`Unable to parse JSON in options for ${m[1]} - ignoring options`);
+      }
+      return { id: m[1], source: m[2], config, styleIdx: i };
+    }
+  }
+  return null;
+}
+
+// Is this line a matching END marker for the given style?
+function isWriteEndForStyle(line, styleIdx) {
+  const token = writeMarkerStyles[styleIdx].end;
+  return line.includes(token);
+}
 
 // extractReadID uses regex to exract the id from a string
 function extractReadID(line) {
   const matches = line.match(readMatchRegexp);
   return matches[1];
-}
-
-// extractWriteIDAndConfig uses regex to extract the id from a string
-function extractWriteIDAndConfig(line) {
-  const matches = line.match(writeMatchRegexp);
-  let id = matches[1];
-  let config = {};
-  try {
-    config =  matches[3] ? JSON.parse(matches[3]) : undefined ;
-  } catch {
-    console.error(`Unable to parse JSON in options for ${id} - ignoring options`);
-    config = undefined;
-  }
-  let source = matches[2];
-
-  return {id, config, source};
 }
 
 // overwriteConfig uses values if provided in the snippet placeholder

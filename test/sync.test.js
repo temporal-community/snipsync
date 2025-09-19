@@ -357,3 +357,129 @@ test('Local file ingestion', async() => {
   const expected = fs.readFileSync(`test/fixtures/expected-test-local-files.md`, 'utf8');
   expect(data).toMatch(expected);
 });
+
+
+test('MDX/JSX markers are recognized and paired correctly', async () => {
+  // Write a local source file with a simple snippet
+  const srcPath = `${testEnvPath}/src.ts`;
+  fs.writeFileSync(srcPath, `// @@@SNIPSTART demo-jsx
+export const n = 1;
+// @@@SNIPEND
+`);
+
+  // MDX target uses JSX-style markers
+  const mdxPath = `${testEnvPath}/jsx_markers.mdx`;
+  fs.writeFileSync(mdxPath, `{/* SNIPSTART demo-jsx */}
+{/* SNIPEND */}
+`);
+
+  // Configure Snipsync to read from the local source file and only touch .mdx
+  cfg.origins = [
+    {
+      files: {
+        pattern: srcPath,
+        owner: "temporalio",
+        repo: "snipsync",
+        ref: "main",
+      },
+    },
+  ];
+  cfg.features.allowed_target_extensions = ['.mdx'];
+  cfg.features.enable_code_block = true;       // ensure fences are emitted
+  cfg.features.enable_code_dedenting = true;   // any dedent behavior applies to the snippet body only
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const out = fs.readFileSync(mdxPath, 'utf8');
+
+  // Assert: snippet content was injected between JSX markers with a TS fence
+  expect(out).toMatch(/\{\/\*\s*SNIPSTART demo-jsx\s*\*\/\}/);
+  expect(out).toMatch(/\{\/\*\s*SNIPEND\s*\*\/\}/);
+});
+
+test('No cross-pairing: HTML start must close with HTML end; JSX with JSX', async () => {
+  // Local source with two snippets: one "good" and one for the mispaired case
+  const srcPath = `${testEnvPath}/src2.ts`;
+  fs.writeFileSync(srcPath, `// @@@SNIPSTART good-pair
+const ok = 1;
+// @@@SNIPEND
+
+// @@@SNIPSTART mispaired
+const nope = 2;
+// @@@SNIPEND
+`);
+
+  // MDX target:
+  //  - first region uses HTML markers (properly paired) → should splice
+  //  - second region uses HTML start + JSX end (cross) → should NOT splice
+  const mdxPath = `${testEnvPath}/mixed_markers.mdx`;
+  fs.writeFileSync(mdxPath, `<!--SNIPSTART good-pair -->
+<!--SNIPEND-->
+
+<!--SNIPSTART mispaired -->
+{/* SNIPEND */}
+`);
+
+  cfg.origins = [
+    {
+      files: {
+        pattern: srcPath,
+        owner: "temporalio",
+        repo: "snipsync",
+        ref: "main",
+      },
+    },
+  ];
+  cfg.features.allowed_target_extensions = ['.mdx'];
+  cfg.features.enable_code_block = true;
+  cfg.features.enable_code_dedenting = true;
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const out = fs.readFileSync(mdxPath, 'utf8');
+
+  // Helper: extract content between an HTML start/end pair
+  const htmlRegion = out.match(/<!--SNIPSTART good-pair -->\n([\s\S]*?)\n<!--SNIPEND-->/);
+  expect(htmlRegion).toBeTruthy();
+  const htmlBody = htmlRegion[1];
+
+  // Properly paired HTML markers should have received the snippet (with a fence and the code)
+  expect(htmlBody).toMatch(/```ts[\s\S]*const ok = 1;[\s\S]*```/);
+
+  // Cross-paired region: HTML start + JSX end should NOT close/splice
+  // The safest assertion: between those two lines there should NOT be a code fence nor the snippet text.
+  const crossStartIdx = out.indexOf('<!--SNIPSTART mispaired -->');
+  const crossEndIdx = out.indexOf('{/* SNIPEND */}');
+  expect(crossStartIdx).toBeGreaterThan(-1);
+  expect(crossEndIdx).toBeGreaterThan(-1);
+  const crossBody = out.slice(
+    crossStartIdx + '<!--SNIPSTART mispaired -->'.length,
+    crossEndIdx
+  );
+
+  // Should not contain a code fence nor the snippet line "const nope = 2;"
+  expect(crossBody).not.toMatch(/```/);
+  expect(crossBody).not.toMatch(/const nope = 2;/);
+
+  // (Optional) now clear and ensure only the properly paired region is cleared
+  const synctron2 = new Sync(cfg, logger);
+  await synctron2.clear();
+  const cleared = fs.readFileSync(mdxPath, 'utf8');
+
+  // After clear(): the good HTML-paired region should be empty between its markers
+  const htmlRegionAfter = cleared.match(/<!--\s*SNIPSTART\s+good-pair\s*-->\s*([\s\S]*?)\s*<!--\s*SNIPEND\s*-->/);
+  expect(htmlRegionAfter).toBeTruthy();
+  expect(htmlRegionAfter[1].trim()).toBe(''); // snippet content removed
+
+  // The mispaired region should remain unchanged (still no fence or snippet)
+  const crossStartIdx2 = cleared.indexOf('<!--SNIPSTART mispaired -->');
+  const crossEndIdx2 = cleared.indexOf('{/* SNIPEND */}');
+  const crossBody2 = cleared.slice(
+    crossStartIdx2 + '<!--SNIPSTART mispaired -->'.length,
+    crossEndIdx2
+  );
+  expect(crossBody2).not.toMatch(/```/);
+  expect(crossBody2).not.toMatch(/const nope = 2;/);
+});

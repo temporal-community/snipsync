@@ -6,7 +6,8 @@ module.exports = {
   fmtStartCodeBlock: (ext) => '```' + ext,
   readStart: '@@@SNIPSTART',
   readEnd: '@@@SNIPEND',
-  writeStart: '<!--SNIPSTART',
-  writeStartClose: '-->',
-  writeEnd: '<!--SNIPEND',
+  writeMarkerStyles: [
+    { openStart: '<!--SNIPSTART', openClose: '-->', end: '<!--SNIPEND' },     // HTML comment
+    { openStart: '{/* SNIPSTART', openClose: '*/}', end: '{/* SNIPEND' },     // MDX/JSX comment
+  ],
 };
