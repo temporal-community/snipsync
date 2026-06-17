@@ -12,7 +12,7 @@ const {
   rootDir,
   writeMarkerStyles
 } = require("./common");
-const { writeFile, unlink } = require("fs");
+const { writeFile, unlink, existsSync } = require("fs");
 const path = require("path");
 const arrayBuffToBuff = require("arraybuffer-to-buffer");
 const anzip = require("anzip");
@@ -270,6 +270,35 @@ class Sync {
           throw new Error(`Invalid origin: ${JSON.stringify(origin)}`);
         }
         const { owner, repo, ref } = origin;
+        const localReposDir = process.env.SNIPSYNC_LOCAL_REPOS;
+        if (localReposDir) {
+          const candidates = [
+            join(localReposDir, `${owner}-${repo}`),
+            join(localReposDir, repo),
+          ];
+          const localPath = candidates.find((p) => existsSync(p));
+          if (localPath) {
+            console.log(`snipsync: using local repo ${localPath} for ${owner}/${repo}`);
+            const { execSync } = require("child_process");
+            const grepResult = execSync(
+              `grep -rl "${readStart}" . --include="*.go" --include="*.java" --include="*.py" --include="*.ts" --include="*.js" --include="*.cs" --include="*.yaml" --include="*.yml" --include="*.rb" --include="*.php" --include="*.sample" 2>/dev/null || true`,
+              { cwd: localPath, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
+            );
+            const filePaths = grepResult.trim().split("\n").filter(Boolean).map((f) => ({
+              name: basename(f),
+              directory: join(localPath, dirname(f)),
+            }));
+            repositories.push({
+              rtype: 'local',
+              owner,
+              repo,
+              ref,
+              filePaths,
+            });
+            this.progress.increment();
+            return;
+          }
+        }
         const repository = new Repo('remote', owner, repo, ref);
         try {
           await retryWithExponentialBackoff(async () => {
