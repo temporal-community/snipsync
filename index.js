@@ -6,12 +6,17 @@ const { Sync } = require('./src/Sync');
 logger.useDefaults();
 const args = process.argv.slice(2);
 const cfg = readConfig(logger);
-const synctron = new Sync(cfg, logger);
 
-switch (args[0]) {
-  case '--clear':
-    synctron.clear();
-    break;
-  default:
-    synctron.run();
+const opts = {};
+const targetIdx = args.indexOf('--target');
+if (targetIdx !== -1 && args[targetIdx + 1]) {
+  opts.targetFilter = args[targetIdx + 1];
+}
+
+const synctron = new Sync(cfg, logger, opts);
+
+if (args.includes('--clear')) {
+  synctron.clear();
+} else {
+  synctron.run();
 }

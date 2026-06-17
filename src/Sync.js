@@ -195,22 +195,19 @@ class ProgressBar {
 // Sync is the class of methods that can be used to do the following:
 // Download repos, extract code snippets, merge snippets, and clear snippets from target files
 class Sync {
-  constructor(cfg, logger) {
+  constructor(cfg, logger, opts = {}) {
     this.config = cfg;
     this.origins = cfg.origins;
     this.logger = logger;
     const octokit = new Octokit();
     this.github = octokit;
     this.progress = new ProgressBar();
+    this.targetFilter = opts.targetFilter || null;
   }
   // run is the main method of the Sync class that downloads, extracts, and merges snippets
   async run() {
     this.progress.start("starting snipsync operations");
-    // Download repo as zip file.
-    // Extract to sync_repos directory.
-    // Get repository details and file paths.
     const repositories = await this.getRepos();
-    // Search each origin file and scrape the snippets
     let snippets = [];
     try {
       snippets = await this.extractSnippets(repositories, snippets);
@@ -219,15 +216,10 @@ class Sync {
       await this.cleanUp();
       process.exit(1);
     }
-    // Get the infos (name, path) of all the files in the target directories
     let targetFiles = await this.getTargetFilesInfos();
-    // Add the lines of each file
     targetFiles = await this.getTargetFilesLines(targetFiles);
-    // Splice the snippets in the file objects
     const splicedFiles = await this.spliceSnippets(snippets, targetFiles);
-    // Overwrite the files to the target directories
     await this.writeFiles(splicedFiles);
-    // Delete the sync_repos directory
     await this.cleanUp();
     this.progress.updateOperation("done");
     this.progress.stop();
@@ -350,6 +342,21 @@ class Sync {
     this.progress.updateTotal(this.config.targets.length);
     const targetFiles = [];
     const allowed_extensions = this.config.features.allowed_target_extensions;
+    if (this.targetFilter) {
+      const matched = glob.sync(this.targetFilter);
+      for (const filePath of matched) {
+        const fullPath = path.resolve(filePath);
+        if (
+          allowed_extensions.length === 0 ||
+          allowed_extensions.includes(path.extname(filePath))
+        ) {
+          const file = new File(basename(fullPath), fullPath);
+          targetFiles.push(file);
+        }
+      }
+      this.progress.increment();
+      return targetFiles;
+    }
     for (const target of this.config.targets) {
       const targetDirPath = join(rootDir, target);
       for await (const entry of readdirp(targetDirPath)) {
