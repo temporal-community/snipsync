@@ -104,6 +104,37 @@ test('Changes only markdown files when allowed_target_extensions is set to .md',
 
 });
 
+test('Leaves files with no snippet markers completely untouched', async() => {
+  fs.copyFileSync(`${fixturesPath}/no-snippets.md`, `${testEnvPath}/no-snippets.md`);
+  const beforeContent = fs.readFileSync(`${testEnvPath}/no-snippets.md`, 'utf8');
+  const beforeMtime = fs.statSync(`${testEnvPath}/no-snippets.md`).mtimeMs;
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const afterContent = fs.readFileSync(`${testEnvPath}/no-snippets.md`, 'utf8');
+  const afterMtime = fs.statSync(`${testEnvPath}/no-snippets.md`).mtimeMs;
+
+  // No SNIPSTART/SNIPEND markers means nothing to splice, so the file
+  // (including its lack of a trailing newline) must be byte-for-byte
+  // untouched — not rewritten with a forced trailing newline.
+  expect(afterContent).toBe(beforeContent);
+  expect(afterMtime).toBe(beforeMtime);
+});
+
+test('Does not rewrite a target file when its spliced content has not changed', async() => {
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+  const beforeMtime = fs.statSync(`${testEnvPath}/index.md`).mtimeMs;
+
+  // Re-run against the same upstream snippet content; nothing should change.
+  const synctron2 = new Sync(cfg, logger);
+  await synctron2.run();
+  const afterMtime = fs.statSync(`${testEnvPath}/index.md`).mtimeMs;
+
+  expect(afterMtime).toBe(beforeMtime);
+});
+
 test('Cleans snippets from files that were not cleaned up previously', async() => {
   fs.copyFileSync(`${fixturesPath}/index_with_code.md`,`${testEnvPath}/index_with_code.md`);
 
