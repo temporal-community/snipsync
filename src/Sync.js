@@ -12,7 +12,7 @@ const {
   rootDir,
   writeMarkerStyles
 } = require("./common");
-const { writeFile, unlink } = require("fs");
+const { writeFile, unlink, readFile } = require("fs");
 const path = require("path");
 const arrayBuffToBuff = require("arraybuffer-to-buffer");
 const anzip = require("anzip");
@@ -27,6 +27,7 @@ const { deindentByCommonPrefix, indentBy, leadingWhitespace, SENSITIVE_INDENT_EX
 
 // Convert dependency functions to return promises
 const writeAsync = promisify(writeFile);
+const readFileAsync = promisify(readFile);
 const unlinkAsync = promisify(unlink);
 const eachLineAsync = promisify(eachLine);
 const rimrafAsync = promisify(rimraf);
@@ -150,11 +151,18 @@ class File {
     this.filename = filename;
     this.fullpath = fullpath;
     this.lines = [];
+    // Raw on-disk content at read time, captured before any line-based
+    // parsing/rewriting. Used to detect true no-op writes.
+    this.original = null;
   }
-  // fileString converts the array of lines into a string
+  // fileString converts the array of lines into a string. It preserves the
+  // original file's trailing-newline convention (or lack of one) so that a
+  // file with nothing spliced into it reconstructs byte-for-byte identical
+  // to what was already on disk, instead of always forcing a final newline.
   fileString() {
-    let lines = `${this.lines.join("\n")}\n`;
-    return lines;
+    const body = this.lines.join("\n");
+    const hadTrailingNewline = this.original === null || this.original === "" || this.original.endsWith("\n");
+    return hadTrailingNewline ? `${body}\n` : body;
   }
 }
 class ProgressBar {
@@ -195,22 +203,19 @@ class ProgressBar {
 // Sync is the class of methods that can be used to do the following:
 // Download repos, extract code snippets, merge snippets, and clear snippets from target files
 class Sync {
-  constructor(cfg, logger) {
+  constructor(cfg, logger, opts = {}) {
     this.config = cfg;
     this.origins = cfg.origins;
     this.logger = logger;
     const octokit = new Octokit();
     this.github = octokit;
     this.progress = new ProgressBar();
+    this.targetFilter = opts.targetFilter || null;
   }
   // run is the main method of the Sync class that downloads, extracts, and merges snippets
   async run() {
     this.progress.start("starting snipsync operations");
-    // Download repo as zip file.
-    // Extract to sync_repos directory.
-    // Get repository details and file paths.
     const repositories = await this.getRepos();
-    // Search each origin file and scrape the snippets
     let snippets = [];
     try {
       snippets = await this.extractSnippets(repositories, snippets);
@@ -219,15 +224,10 @@ class Sync {
       await this.cleanUp();
       process.exit(1);
     }
-    // Get the infos (name, path) of all the files in the target directories
     let targetFiles = await this.getTargetFilesInfos();
-    // Add the lines of each file
     targetFiles = await this.getTargetFilesLines(targetFiles);
-    // Splice the snippets in the file objects
     const splicedFiles = await this.spliceSnippets(snippets, targetFiles);
-    // Overwrite the files to the target directories
     await this.writeFiles(splicedFiles);
-    // Delete the sync_repos directory
     await this.cleanUp();
     this.progress.updateOperation("done");
     this.progress.stop();
@@ -350,6 +350,21 @@ class Sync {
     this.progress.updateTotal(this.config.targets.length);
     const targetFiles = [];
     const allowed_extensions = this.config.features.allowed_target_extensions;
+    if (this.targetFilter) {
+      const matched = glob.sync(this.targetFilter);
+      for (const filePath of matched) {
+        const fullPath = path.resolve(filePath);
+        if (
+          allowed_extensions.length === 0 ||
+          allowed_extensions.includes(path.extname(filePath))
+        ) {
+          const file = new File(basename(fullPath), fullPath);
+          targetFiles.push(file);
+        }
+      }
+      this.progress.increment();
+      return targetFiles;
+    }
     for (const target of this.config.targets) {
       const targetDirPath = join(rootDir, target);
       for await (const entry of readdirp(targetDirPath)) {
@@ -379,6 +394,7 @@ class Sync {
   }
   // readLines reads each line of the file
   async readLines(targetFile) {
+    targetFile.original = await readFileAsync(targetFile.fullpath, "utf8");
     const fileLines = [];
     await eachLineAsync(targetFile.fullpath, (line) => {
       fileLines.push(line);
@@ -560,16 +576,29 @@ class Sync {
   return file;
 }
 
-  // writeFiles writes file lines to target files
+  // writeFiles writes file lines to target files, skipping any file whose
+  // resulting content is identical to what's already on disk. This keeps
+  // files with no matching snippets (or whose snippets didn't change)
+  // completely untouched instead of rewriting every target file on every run.
   async writeFiles(files) {
     this.progress.updateOperation("writing updated files");
     this.progress.updateTotal(files.length);
+    let skipped = 0;
     for (const file of files) {
+      const content = file.fileString();
+      if (content === file.original) {
+        skipped++;
+        this.progress.increment();
+        continue;
+      }
       await writeAsync(
         file.fullpath,
-        file.fileString()
+        content
       );
       this.progress.increment();
+    }
+    if (skipped > 0) {
+      this.logger.info(`snipsync: ${skipped}/${files.length} target file(s) unchanged, left untouched`);
     }
     return;
   }

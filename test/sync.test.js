@@ -104,6 +104,37 @@ test('Changes only markdown files when allowed_target_extensions is set to .md',
 
 });
 
+test('Leaves files with no snippet markers completely untouched', async() => {
+  fs.copyFileSync(`${fixturesPath}/no-snippets.md`, `${testEnvPath}/no-snippets.md`);
+  const beforeContent = fs.readFileSync(`${testEnvPath}/no-snippets.md`, 'utf8');
+  const beforeMtime = fs.statSync(`${testEnvPath}/no-snippets.md`).mtimeMs;
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const afterContent = fs.readFileSync(`${testEnvPath}/no-snippets.md`, 'utf8');
+  const afterMtime = fs.statSync(`${testEnvPath}/no-snippets.md`).mtimeMs;
+
+  // No SNIPSTART/SNIPEND markers means nothing to splice, so the file
+  // (including its lack of a trailing newline) must be byte-for-byte
+  // untouched — not rewritten with a forced trailing newline.
+  expect(afterContent).toBe(beforeContent);
+  expect(afterMtime).toBe(beforeMtime);
+});
+
+test('Does not rewrite a target file when its spliced content has not changed', async() => {
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+  const beforeMtime = fs.statSync(`${testEnvPath}/index.md`).mtimeMs;
+
+  // Re-run against the same upstream snippet content; nothing should change.
+  const synctron2 = new Sync(cfg, logger);
+  await synctron2.run();
+  const afterMtime = fs.statSync(`${testEnvPath}/index.md`).mtimeMs;
+
+  expect(afterMtime).toBe(beforeMtime);
+});
+
 test('Cleans snippets from files that were not cleaned up previously', async() => {
   fs.copyFileSync(`${fixturesPath}/index_with_code.md`,`${testEnvPath}/index_with_code.md`);
 
@@ -662,4 +693,104 @@ const n = 1;
 
   expect(second).toEqual(first);
   expect(first).toMatch(/^ {2}const n = 1;$/m);
+});
+
+// --- --target filter -------------------------------------------------------
+// Each of these pins one behavior documented in the README's
+// "Sync only some files" section.
+
+const targetFilterSrc = (dir, id) => {
+  const srcPath = `${dir}/${id}-src.ts`;
+  fs.writeFileSync(srcPath, `// @@@SNIPSTART ${id}\nconst n = 1;\n// @@@SNIPEND\n`);
+  return srcPath;
+};
+const localOrigin = (srcPath) => [
+  { files: { pattern: srcPath, owner: 'temporalio', repo: 'snipsync', ref: 'main' } },
+];
+const emptyMarkers = (id) => `<!--SNIPSTART ${id}-->\n<!--SNIPEND-->\n`;
+
+test('targetFilter limits the splice to files matching the glob', async () => {
+  const srcPath = targetFilterSrc(testEnvPath, 'tf-scope');
+  const inScope = `${testEnvPath}/in-scope.md`;
+  const outOfScope = `${testEnvPath}/out-of-scope.md`;
+  fs.writeFileSync(inScope, emptyMarkers('tf-scope'));
+  fs.writeFileSync(outOfScope, emptyMarkers('tf-scope'));
+
+  cfg.origins = localOrigin(srcPath);
+  cfg.features.allowed_target_extensions = ['.md'];
+
+  await new Sync(cfg, logger, { targetFilter: inScope }).run();
+
+  expect(fs.readFileSync(inScope, 'utf8')).toMatch(/const n = 1;/);
+  expect(fs.readFileSync(outOfScope, 'utf8')).not.toMatch(/const n = 1;/);
+});
+
+test('targetFilter replaces targets, so it can match files outside them', async () => {
+  const outsideDir = 'test/.tmp-outside';
+  fs.mkdirSync(outsideDir, { recursive: true });
+  try {
+    const srcPath = targetFilterSrc(testEnvPath, 'tf-outside');
+    const outsideFile = `${outsideDir}/page.md`;
+    fs.writeFileSync(outsideFile, emptyMarkers('tf-outside'));
+
+    cfg.origins = localOrigin(srcPath);
+    cfg.targets = [testEnvPath]; // deliberately does not include outsideDir
+    cfg.features.allowed_target_extensions = ['.md'];
+
+    await new Sync(cfg, logger, { targetFilter: `${outsideDir}/*.md` }).run();
+
+    expect(fs.readFileSync(outsideFile, 'utf8')).toMatch(/const n = 1;/);
+  } finally {
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test('targetFilter still respects allowed_target_extensions', async () => {
+  const srcPath = targetFilterSrc(testEnvPath, 'tf-ext');
+  const allowed = `${testEnvPath}/page.md`;
+  const blocked = `${testEnvPath}/page.txt`;
+  fs.writeFileSync(allowed, emptyMarkers('tf-ext'));
+  fs.writeFileSync(blocked, emptyMarkers('tf-ext'));
+
+  cfg.origins = localOrigin(srcPath);
+  cfg.features.allowed_target_extensions = ['.md'];
+
+  // Point the glob at the .txt only. The extension list excludes it, so nothing
+  // is spliced at all: the .txt because of the extension, the .md because the
+  // glob never selected it.
+  await new Sync(cfg, logger, { targetFilter: blocked }).run();
+
+  expect(fs.readFileSync(blocked, 'utf8')).not.toMatch(/const n = 1;/);
+  expect(fs.readFileSync(allowed, 'utf8')).not.toMatch(/const n = 1;/);
+});
+
+test('clear honors targetFilter', async () => {
+  const spliced = '<!--SNIPSTART tf-clear-->\n```ts\nconst n = 1;\n```\n<!--SNIPEND-->\n';
+  const cleared = `${testEnvPath}/cleared.md`;
+  const untouched = `${testEnvPath}/untouched.md`;
+  fs.writeFileSync(cleared, spliced);
+  fs.writeFileSync(untouched, spliced);
+
+  cfg.features.allowed_target_extensions = ['.md'];
+
+  await new Sync(cfg, logger, { targetFilter: cleared }).clear();
+
+  expect(fs.readFileSync(cleared, 'utf8')).not.toMatch(/const n = 1;/);
+  expect(fs.readFileSync(untouched, 'utf8')).toMatch(/const n = 1;/);
+});
+
+test('omitting targetFilter still walks every configured target', async () => {
+  const srcPath = targetFilterSrc(testEnvPath, 'tf-all');
+  const first = `${testEnvPath}/first.md`;
+  const second = `${testEnvPath}/second.md`;
+  fs.writeFileSync(first, emptyMarkers('tf-all'));
+  fs.writeFileSync(second, emptyMarkers('tf-all'));
+
+  cfg.origins = localOrigin(srcPath);
+  cfg.features.allowed_target_extensions = ['.md'];
+
+  await new Sync(cfg, logger).run();
+
+  expect(fs.readFileSync(first, 'utf8')).toMatch(/const n = 1;/);
+  expect(fs.readFileSync(second, 'utf8')).toMatch(/const n = 1;/);
 });
