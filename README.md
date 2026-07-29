@@ -172,6 +172,28 @@ From the root directory of your project run the following command:
 yarn snipsync
 ```
 
+### Sync only some files
+
+Pass `--target` with a [glob](https://www.npmjs.com/package/glob) to splice a
+subset of your target files:
+
+```bash
+yarn snipsync --target "docs/develop/dotnet/index.mdx"
+yarn snipsync --target "docs/develop/dotnet/**/*.mdx"
+```
+
+Origins are still downloaded and all snippets extracted, so only the splice step
+gets faster. Scoping to a single page in the Temporal documentation repository
+takes a run from about 90 seconds to under 20.
+
+Notes on the glob:
+
+- It resolves from the directory you run the command in.
+- It replaces `targets` rather than filtering it, so it can match files outside
+  your configured target directories.
+- `allowed_target_extensions` still applies.
+- Quote it and pass it as a separate argument, so your shell does not expand it.
+
 ### Remove snippets
 
 In some cases, you may want to remove the snippets from your target files.
@@ -179,6 +201,12 @@ Use the `--clear` flag to do that:
 
 ```
 yarn snipsync --clear
+```
+
+`--clear` takes `--target` too:
+
+```bash
+yarn snipsync --clear --target "docs/develop/dotnet/index.mdx"
 ```
 
 ## Development
