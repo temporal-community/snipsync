@@ -553,3 +553,103 @@ test('Splice warns and does not modify on mismatched end', async () => {
   // Cleanup spy
   warnSpy.mockRestore();
 });
+
+// --- --target filter -------------------------------------------------------
+// Each of these pins one behavior documented in the README's
+// "Sync only some files" section.
+
+const targetFilterSrc = (dir, id) => {
+  const srcPath = `${dir}/${id}-src.ts`;
+  fs.writeFileSync(srcPath, `// @@@SNIPSTART ${id}\nconst n = 1;\n// @@@SNIPEND\n`);
+  return srcPath;
+};
+const localOrigin = (srcPath) => [
+  { files: { pattern: srcPath, owner: 'temporalio', repo: 'snipsync', ref: 'main' } },
+];
+const emptyMarkers = (id) => `<!--SNIPSTART ${id}-->\n<!--SNIPEND-->\n`;
+
+test('targetFilter limits the splice to files matching the glob', async () => {
+  const srcPath = targetFilterSrc(testEnvPath, 'tf-scope');
+  const inScope = `${testEnvPath}/in-scope.md`;
+  const outOfScope = `${testEnvPath}/out-of-scope.md`;
+  fs.writeFileSync(inScope, emptyMarkers('tf-scope'));
+  fs.writeFileSync(outOfScope, emptyMarkers('tf-scope'));
+
+  cfg.origins = localOrigin(srcPath);
+  cfg.features.allowed_target_extensions = ['.md'];
+
+  await new Sync(cfg, logger, { targetFilter: inScope }).run();
+
+  expect(fs.readFileSync(inScope, 'utf8')).toMatch(/const n = 1;/);
+  expect(fs.readFileSync(outOfScope, 'utf8')).not.toMatch(/const n = 1;/);
+});
+
+test('targetFilter replaces targets, so it can match files outside them', async () => {
+  const outsideDir = 'test/.tmp-outside';
+  fs.mkdirSync(outsideDir, { recursive: true });
+  try {
+    const srcPath = targetFilterSrc(testEnvPath, 'tf-outside');
+    const outsideFile = `${outsideDir}/page.md`;
+    fs.writeFileSync(outsideFile, emptyMarkers('tf-outside'));
+
+    cfg.origins = localOrigin(srcPath);
+    cfg.targets = [testEnvPath]; // deliberately does not include outsideDir
+    cfg.features.allowed_target_extensions = ['.md'];
+
+    await new Sync(cfg, logger, { targetFilter: `${outsideDir}/*.md` }).run();
+
+    expect(fs.readFileSync(outsideFile, 'utf8')).toMatch(/const n = 1;/);
+  } finally {
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test('targetFilter still respects allowed_target_extensions', async () => {
+  const srcPath = targetFilterSrc(testEnvPath, 'tf-ext');
+  const allowed = `${testEnvPath}/page.md`;
+  const blocked = `${testEnvPath}/page.txt`;
+  fs.writeFileSync(allowed, emptyMarkers('tf-ext'));
+  fs.writeFileSync(blocked, emptyMarkers('tf-ext'));
+
+  cfg.origins = localOrigin(srcPath);
+  cfg.features.allowed_target_extensions = ['.md'];
+
+  // Point the glob at the .txt only. The extension list excludes it, so nothing
+  // is spliced at all: the .txt because of the extension, the .md because the
+  // glob never selected it.
+  await new Sync(cfg, logger, { targetFilter: blocked }).run();
+
+  expect(fs.readFileSync(blocked, 'utf8')).not.toMatch(/const n = 1;/);
+  expect(fs.readFileSync(allowed, 'utf8')).not.toMatch(/const n = 1;/);
+});
+
+test('clear honors targetFilter', async () => {
+  const spliced = '<!--SNIPSTART tf-clear-->\n```ts\nconst n = 1;\n```\n<!--SNIPEND-->\n';
+  const cleared = `${testEnvPath}/cleared.md`;
+  const untouched = `${testEnvPath}/untouched.md`;
+  fs.writeFileSync(cleared, spliced);
+  fs.writeFileSync(untouched, spliced);
+
+  cfg.features.allowed_target_extensions = ['.md'];
+
+  await new Sync(cfg, logger, { targetFilter: cleared }).clear();
+
+  expect(fs.readFileSync(cleared, 'utf8')).not.toMatch(/const n = 1;/);
+  expect(fs.readFileSync(untouched, 'utf8')).toMatch(/const n = 1;/);
+});
+
+test('omitting targetFilter still walks every configured target', async () => {
+  const srcPath = targetFilterSrc(testEnvPath, 'tf-all');
+  const first = `${testEnvPath}/first.md`;
+  const second = `${testEnvPath}/second.md`;
+  fs.writeFileSync(first, emptyMarkers('tf-all'));
+  fs.writeFileSync(second, emptyMarkers('tf-all'));
+
+  cfg.origins = localOrigin(srcPath);
+  cfg.features.allowed_target_extensions = ['.md'];
+
+  await new Sync(cfg, logger).run();
+
+  expect(fs.readFileSync(first, 'utf8')).toMatch(/const n = 1;/);
+  expect(fs.readFileSync(second, 'utf8')).toMatch(/const n = 1;/);
+});
