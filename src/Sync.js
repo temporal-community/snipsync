@@ -23,7 +23,7 @@ const glob = require("glob");
 const { type } = require("os");
 
 // Deindenting dependencies
-const { deindentByCommonPrefix, SENSITIVE_INDENT_EXTS } = require("./deindent");
+const { deindentByCommonPrefix, indentBy, leadingWhitespace, SENSITIVE_INDENT_EXTS } = require("./deindent");
 
 // Convert dependency functions to return promises
 const writeAsync = promisify(writeFile);
@@ -470,7 +470,11 @@ class Sync {
   // spliceFile merges an individual snippet into the file
   async spliceFile(start, end, snippet, file, config) {
     const rmlines = end - start;
-    file.lines.splice(start, rmlines - 1, ...snippet.fmt(config));
+    // `start` is the 1-based line number of the SNIPSTART marker, so the marker
+    // itself lives at index start - 1. Match its indentation so the spliced
+    // block stays inside whatever Markdown or JSX block encloses the marker.
+    const indent = leadingWhitespace(file.lines[start - 1]);
+    file.lines.splice(start, rmlines - 1, ...indentBy(snippet.fmt(config), indent));
     return file;
   }
   // clearSnippets loops through target files to remove snippets

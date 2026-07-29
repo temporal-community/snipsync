@@ -553,3 +553,113 @@ test('Splice warns and does not modify on mismatched end', async () => {
   // Cleanup spy
   warnSpy.mockRestore();
 });
+
+test('Spliced content inherits the indentation of the SNIPSTART marker', async () => {
+  const srcPath = `${testEnvPath}/indent-src.ts`;
+  fs.writeFileSync(srcPath, `// @@@SNIPSTART indent-demo
+const driver = new Driver({
+  bucket: 'my-bucket',
+});
+// @@@SNIPEND
+`);
+
+  // The marker is nested three spaces deep, as it is when it sits inside a
+  // numbered list item in a docs page.
+  const mdxPath = `${testEnvPath}/indented.mdx`;
+  fs.writeFileSync(mdxPath, `1. Create the driver:
+
+   <!--SNIPSTART indent-demo -->
+   <!--SNIPEND-->
+
+2. Next step.
+`);
+
+  cfg.origins = [
+    { files: { pattern: srcPath, owner: 'temporalio', repo: 'snipsync', ref: 'main' } },
+  ];
+  cfg.features.allowed_target_extensions = ['.mdx'];
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const out = fs.readFileSync(mdxPath, 'utf8');
+  const lines = out.split('\n');
+
+  // Every non-blank line we wrote between the markers carries the marker's indent,
+  // so the code block stays inside list item 1 instead of terminating it.
+  const start = lines.findIndex((l) => l.includes('SNIPSTART indent-demo'));
+  const end = lines.findIndex((l) => l.includes('SNIPEND'));
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+
+  const body = lines.slice(start + 1, end).filter((l) => l.trim().length > 0);
+  expect(body.length).toBeGreaterThan(0);
+  for (const line of body) {
+    expect(line.startsWith('   ')).toBe(true);
+  }
+
+  // The fence, the source link, and the code all made it in.
+  expect(out).toMatch(/^ {3}```ts$/m);
+  expect(out).toMatch(/^ {3}\[.*indent-src\.ts\]\(https:\/\/github\.com\//m);
+  expect(out).toMatch(/^ {3}const driver = new Driver\(\{$/m);
+
+  // Relative indentation inside the snippet survives.
+  expect(out).toMatch(/^ {5}bucket: 'my-bucket',$/m);
+
+  // No blank line picked up trailing whitespace.
+  expect(out).not.toMatch(/^ +$/m);
+});
+
+test('Column-zero markers are spliced without added indentation', async () => {
+  const srcPath = `${testEnvPath}/flush-src.ts`;
+  fs.writeFileSync(srcPath, `// @@@SNIPSTART flush-demo
+const n = 1;
+// @@@SNIPEND
+`);
+
+  const mdxPath = `${testEnvPath}/flush.mdx`;
+  fs.writeFileSync(mdxPath, `<!--SNIPSTART flush-demo -->
+<!--SNIPEND-->
+`);
+
+  cfg.origins = [
+    { files: { pattern: srcPath, owner: 'temporalio', repo: 'snipsync', ref: 'main' } },
+  ];
+  cfg.features.allowed_target_extensions = ['.mdx'];
+
+  const synctron = new Sync(cfg, logger);
+  await synctron.run();
+
+  const out = fs.readFileSync(mdxPath, 'utf8');
+  expect(out).toMatch(/^```ts$/m);
+  expect(out).toMatch(/^const n = 1;$/m);
+});
+
+test('Re-running is idempotent for an indented marker', async () => {
+  const srcPath = `${testEnvPath}/idem-src.ts`;
+  fs.writeFileSync(srcPath, `// @@@SNIPSTART idem-demo
+const n = 1;
+// @@@SNIPEND
+`);
+
+  const mdxPath = `${testEnvPath}/idem.mdx`;
+  fs.writeFileSync(mdxPath, `- item:
+
+  <!--SNIPSTART idem-demo -->
+  <!--SNIPEND-->
+`);
+
+  cfg.origins = [
+    { files: { pattern: srcPath, owner: 'temporalio', repo: 'snipsync', ref: 'main' } },
+  ];
+  cfg.features.allowed_target_extensions = ['.mdx'];
+
+  await new Sync(cfg, logger).run();
+  const first = fs.readFileSync(mdxPath, 'utf8');
+
+  await new Sync(cfg, logger).run();
+  const second = fs.readFileSync(mdxPath, 'utf8');
+
+  expect(second).toEqual(first);
+  expect(first).toMatch(/^ {2}const n = 1;$/m);
+});
