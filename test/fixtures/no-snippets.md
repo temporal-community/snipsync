@@ -1,0 +1,1 @@
+Text with no snippet markers at all.

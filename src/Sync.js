@@ -12,7 +12,7 @@ const {
   rootDir,
   writeMarkerStyles
 } = require("./common");
-const { writeFile, unlink } = require("fs");
+const { writeFile, unlink, readFile } = require("fs");
 const path = require("path");
 const arrayBuffToBuff = require("arraybuffer-to-buffer");
 const anzip = require("anzip");
@@ -27,6 +27,7 @@ const { deindentByCommonPrefix, SENSITIVE_INDENT_EXTS } = require("./deindent");
 
 // Convert dependency functions to return promises
 const writeAsync = promisify(writeFile);
+const readFileAsync = promisify(readFile);
 const unlinkAsync = promisify(unlink);
 const eachLineAsync = promisify(eachLine);
 const rimrafAsync = promisify(rimraf);
@@ -150,11 +151,18 @@ class File {
     this.filename = filename;
     this.fullpath = fullpath;
     this.lines = [];
+    // Raw on-disk content at read time, captured before any line-based
+    // parsing/rewriting. Used to detect true no-op writes.
+    this.original = null;
   }
-  // fileString converts the array of lines into a string
+  // fileString converts the array of lines into a string. It preserves the
+  // original file's trailing-newline convention (or lack of one) so that a
+  // file with nothing spliced into it reconstructs byte-for-byte identical
+  // to what was already on disk, instead of always forcing a final newline.
   fileString() {
-    let lines = `${this.lines.join("\n")}\n`;
-    return lines;
+    const body = this.lines.join("\n");
+    const hadTrailingNewline = this.original === null || this.original === "" || this.original.endsWith("\n");
+    return hadTrailingNewline ? `${body}\n` : body;
   }
 }
 class ProgressBar {
@@ -379,6 +387,7 @@ class Sync {
   }
   // readLines reads each line of the file
   async readLines(targetFile) {
+    targetFile.original = await readFileAsync(targetFile.fullpath, "utf8");
     const fileLines = [];
     await eachLineAsync(targetFile.fullpath, (line) => {
       fileLines.push(line);
@@ -556,16 +565,29 @@ class Sync {
   return file;
 }
 
-  // writeFiles writes file lines to target files
+  // writeFiles writes file lines to target files, skipping any file whose
+  // resulting content is identical to what's already on disk. This keeps
+  // files with no matching snippets (or whose snippets didn't change)
+  // completely untouched instead of rewriting every target file on every run.
   async writeFiles(files) {
     this.progress.updateOperation("writing updated files");
     this.progress.updateTotal(files.length);
+    let skipped = 0;
     for (const file of files) {
+      const content = file.fileString();
+      if (content === file.original) {
+        skipped++;
+        this.progress.increment();
+        continue;
+      }
       await writeAsync(
         file.fullpath,
-        file.fileString()
+        content
       );
       this.progress.increment();
+    }
+    if (skipped > 0) {
+      this.logger.info(`snipsync: ${skipped}/${files.length} target file(s) unchanged, left untouched`);
     }
     return;
   }
