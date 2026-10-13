@@ -32,6 +32,15 @@ const unlinkAsync = promisify(unlink);
 const eachLineAsync = promisify(eachLine);
 const rimrafAsync = promisify(rimraf);
 let disable_ellipsis = false;
+// trimTrailingBlankLines drops blank lines from the end of a snippet's lines, in
+// place. A blank line before the SNIPEND marker is source formatting, not part of
+// the snippet, and would otherwise render as empty space at the bottom of the
+// code block.
+function trimTrailingBlankLines(lines) {
+  while (lines.length && lines[lines.length - 1].trim() === "") {
+    lines.pop();
+  }
+}
 // Snippet class contains info and methods used for passing and formatting code snippets
 class Snippet {
   constructor(id, ext, owner, repo, ref, filePath) {
@@ -337,6 +346,9 @@ class Sync {
               fileSnips.push(snip);
             }
           });
+          for (const snip of fileSnips) {
+            trimTrailingBlankLines(snip.lines);
+          }
           snippets.push(...fileSnips);
           this.progress.increment();
         }
