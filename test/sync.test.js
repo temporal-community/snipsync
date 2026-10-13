@@ -794,3 +794,21 @@ test('omitting targetFilter still walks every configured target', async () => {
   expect(fs.readFileSync(first, 'utf8')).toMatch(/const n = 1;/);
   expect(fs.readFileSync(second, 'utf8')).toMatch(/const n = 1;/);
 });
+
+test('trailing blank lines before SNIPEND are not copied into the snippet', async () => {
+  const srcPath = `${testEnvPath}/trailing-blank-src.py`;
+  fs.writeFileSync(srcPath, '# @@@SNIPSTART tb-trailing\ndef f():\n\n    return 1\n\n  \n# @@@SNIPEND\n');
+  const target = `${testEnvPath}/trailing-blank.md`;
+  fs.writeFileSync(target, emptyMarkers('tb-trailing'));
+
+  cfg.origins = localOrigin(srcPath);
+  cfg.features.allowed_target_extensions = ['.md'];
+  cfg.features.enable_source_link = false;
+
+  await new Sync(cfg, logger).run();
+
+  // Blank lines inside the snippet are kept; only the trailing ones are dropped.
+  expect(fs.readFileSync(target, 'utf8')).toBe(
+    '<!--SNIPSTART tb-trailing-->\n```py\ndef f():\n\n    return 1\n```\n<!--SNIPEND-->\n'
+  );
+});

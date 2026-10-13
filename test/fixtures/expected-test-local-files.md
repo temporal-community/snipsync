@@ -59,7 +59,6 @@ func MoneyTransfer(ctx workflow.Context, input PaymentDetails) (string, error) {
 	result := fmt.Sprintf("Transfer complete (transaction IDs: %s, %s)", withdrawOutput, depositOutput)
 	return result, nil
 }
-
 ```
 <!--SNIPEND-->
 
