@@ -968,6 +968,16 @@ describe('nested snippets', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  test('markers in adjacent block comments are each recognized', async () => {
+    const out = await syncNested(
+      '/* @@@SNIPSTART ac-first */\na\n/* @@@SNIPEND *//*@@@SNIPSTART ac-second */\nb\n/* @@@SNIPEND ac-second */\n',
+      ['ac-first', 'ac-second'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['ac-first']).toBe(rendered('ac-first', 'a'));
+    expect(out['ac-second']).toBe(rendered('ac-second', 'b'));
+  });
+
   test('a SNIPSTART with no identifier is an error', async () => {
     const srcPath = `${testEnvPath}/no-id.go`;
     fs.writeFileSync(srcPath, '// @@@SNIPSTART\na\n// @@@SNIPEND\n');

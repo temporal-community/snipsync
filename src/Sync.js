@@ -708,9 +708,10 @@ function escapeStringRegexp(string) {
 }
 
 // Matches each source marker on a line, plus the token after it (if any). The
-// token can't itself be a marker, so `@@@SNIPEND @@@SNIPSTART x` is two markers.
+// token stops before any embedded marker, so `@@@SNIPEND @@@SNIPSTART x` and
+// `/* @@@SNIPEND *//*@@@SNIPSTART x */` are each two markers.
 const readMarkers = `${escapeStringRegexp(readStart)}|${escapeStringRegexp(readEnd)}`;
-const readMarkerRegexp = new RegExp(`(${readMarkers})(?:\\s+((?!${readMarkers})\\S+))?`, "g");
+const readMarkerRegexp = new RegExp(`(${readMarkers})(?:\\s+((?:(?!${readMarkers})\\S)+))?`, "g");
 
 
 // Build an opening marker regex for a given style.
