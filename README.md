@@ -243,3 +243,10 @@ To clear the snippets run `yarn dev --clear`
 ### Testing
 
 Run `yarn test` from the root of the repo to run the testing suites.
+
+Many tests download the sample repos from GitHub, which allows 60 unauthenticated API requests per hour.
+If you hit that limit, set `GITHUB_TOKEN` to a GitHub token and snipsync will use it to authenticate:
+
+```bash
+GITHUB_TOKEN=$(gh auth token) yarn test
+```

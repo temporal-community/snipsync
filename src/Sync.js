@@ -216,7 +216,12 @@ class Sync {
     this.config = cfg;
     this.origins = cfg.origins;
     this.logger = logger;
-    const octokit = new Octokit();
+    // Authenticate when GITHUB_TOKEN is set (e.g. in CI) to avoid the
+    // 60 requests/hour limit on unauthenticated GitHub API calls.
+    const octokitOpts = process.env.GITHUB_TOKEN
+      ? { auth: process.env.GITHUB_TOKEN }
+      : {};
+    const octokit = new Octokit(octokitOpts);
     this.github = octokit;
     this.progress = new ProgressBar();
     this.targetFilter = opts.targetFilter || null;

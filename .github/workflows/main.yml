@@ -1,11 +1,38 @@
-name: ESLint
-on: push
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
 jobs:
-  build:
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: yarn
       - name: Install modules
-        run: yarn
+        run: yarn install --frozen-lockfile
       - name: Run ESLint
-        run: yarn eslint . --ext .js
+        run: yarn lint
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: yarn
+      - name: Install modules
+        run: yarn install --frozen-lockfile
+      - name: Run Jest
+        run: yarn test
+        env:
+          # Authenticates zipball downloads so the suite stays under the GitHub API rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
