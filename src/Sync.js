@@ -344,24 +344,37 @@ class Sync {
           let extractError = null;
           await eachLineAsync(itemPath, (line) => {
             lineNumber++;
-            if (line.includes(readStart)) {
-              const id = extractReadID(line);
-              const snip = new Snippet(id, ext, owner, repo, ref, item);
-              fileSnips.push(snip);
-              open.push(snip);
-              return;
-            }
-            if (line.includes(readEnd)) {
-              try {
-                this.closeSnippet(open, extractEndID(line), itemPath, lineNumber);
-              } catch (e) {
-                extractError = e;
-                return false; // stop reading this file
+            const startIdx = line.indexOf(readStart);
+            const endIdx = line.indexOf(readEnd);
+            if (startIdx === -1 && endIdx === -1) {
+              for (const snip of open) {
+                snip.lines.push(line);
               }
               return;
             }
-            for (const snip of open) {
-              snip.lines.push(line);
+            const openSnippet = () => {
+              const snip = new Snippet(extractReadID(line), ext, owner, repo, ref, item);
+              fileSnips.push(snip);
+              open.push(snip);
+            };
+            // A marker line is never captured. If one line has both an end and
+            // a start (`/* @@@SNIPEND */ /* @@@SNIPSTART next */`), apply them
+            // in the order they appear so the end closes the previous snippet.
+            try {
+              if (endIdx !== -1 && (startIdx === -1 || endIdx < startIdx)) {
+                this.closeSnippet(open, extractEndID(line), itemPath, lineNumber);
+                if (startIdx !== -1) {
+                  openSnippet();
+                }
+              } else {
+                openSnippet();
+                if (endIdx !== -1) {
+                  this.closeSnippet(open, extractEndID(line), itemPath, lineNumber);
+                }
+              }
+            } catch (e) {
+              extractError = e;
+              return false; // stop reading this file
             }
           });
           if (extractError) {

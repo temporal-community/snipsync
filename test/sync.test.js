@@ -935,6 +935,26 @@ describe('nested snippets', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/unterminated snippet "st-open"/));
   });
 
+  test('an end marker sharing a line with the next start closes the previous snippet first', async () => {
+    const out = await syncNested(
+      '/* @@@SNIPSTART sl-first */\na\n/* @@@SNIPEND */ /* @@@SNIPSTART sl-second */\nb\n/* @@@SNIPEND */\n',
+      ['sl-first', 'sl-second'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['sl-first']).toBe(rendered('sl-first', 'a'));
+    expect(out['sl-second']).toBe(rendered('sl-second', 'b'));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('a start and end on one line produce an empty snippet without swallowing later lines', async () => {
+    const out = await syncNested(
+      '// @@@SNIPSTART se-outer\na\n// @@@SNIPSTART se-empty @@@SNIPEND se-empty\nb\n// @@@SNIPEND se-outer\n',
+      ['se-outer', 'se-empty']
+    );
+    expect(out['se-outer']).toBe(rendered('se-outer', 'a\nb'));
+    expect(out['se-empty']).toBe('<!--SNIPSTART se-empty-->\n```go\n```\n<!--SNIPEND-->\n');
+  });
+
   test('an indented inner snippet is dedented on its own', async () => {
     const out = await syncNested(
       'func f() {\n\t// @@@SNIPSTART dd-outer\n\tif x {\n\t\t// @@@SNIPSTART dd-inner\n\t\ty()\n\t\t// @@@SNIPEND dd-inner\n\t}\n\t// @@@SNIPEND dd-outer\n}\n',
