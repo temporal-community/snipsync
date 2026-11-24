@@ -812,3 +812,224 @@ test('trailing blank lines before SNIPEND are not copied into the snippet', asyn
     '<!--SNIPSTART tb-trailing-->\n```py\ndef f():\n\n    return 1\n```\n<!--SNIPEND-->\n'
   );
 });
+
+describe('nested snippets', () => {
+  // Writes `source` to a local origin file, an empty target per id, runs a sync,
+  // and returns each target's content keyed by id.
+  const syncNested = async (source, ids, { ext = 'go', features = {} } = {}) => {
+    const srcPath = `${testEnvPath}/nested-src.${ext}`;
+    fs.writeFileSync(srcPath, source);
+    for (const id of ids) {
+      fs.writeFileSync(`${testEnvPath}/${id}.md`, emptyMarkers(id));
+    }
+    cfg.origins = localOrigin(srcPath);
+    cfg.features.allowed_target_extensions = ['.md'];
+    cfg.features.enable_source_link = false;
+    Object.assign(cfg.features, features);
+    await new Sync(cfg, logger).run();
+    return Object.fromEntries(
+      ids.map((id) => [id, fs.readFileSync(`${testEnvPath}/${id}.md`, 'utf8')])
+    );
+  };
+  const rendered = (id, body, ext = 'go') =>
+    `<!--SNIPSTART ${id}-->\n\`\`\`${ext}\n${body}\n\`\`\`\n<!--SNIPEND-->\n`;
+
+  let warn;
+  beforeEach(() => {
+    warn = jest.spyOn(logger, 'warn');
+  });
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  test('nested snippets with unnamed ends capture their own lines, without inner markers, and warn', async () => {
+    const out = await syncNested(
+      '// @@@SNIPSTART n-outer\na\n// @@@SNIPSTART n-inner\nb\n// @@@SNIPEND\nc\n// @@@SNIPEND\n',
+      ['n-outer', 'n-inner']
+    );
+    expect(out['n-outer']).toBe(rendered('n-outer', 'a\nb\nc'));
+    expect(out['n-inner']).toBe(rendered('n-inner', 'b'));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/unnamed @@@SNIPEND .*nested-src\.go:5 .*"n-inner"/));
+  });
+
+  test('nested snippets with unnamed ends are an error when require_named_nested_ends is set', async () => {
+    const srcPath = `${testEnvPath}/nested-strict.go`;
+    fs.writeFileSync(
+      srcPath,
+      '// @@@SNIPSTART s-outer\na\n// @@@SNIPSTART s-inner\nb\n// @@@SNIPEND\nc\n// @@@SNIPEND\n'
+    );
+    cfg.origins = localOrigin(srcPath);
+    cfg.features.require_named_nested_ends = true;
+    const sync = new Sync(cfg, logger);
+    const repos = await sync.getRepos();
+    await expect(sync.extractSnippets(repos, [])).rejects.toThrow(/nested-strict\.go:5 .*"s-inner"/);
+  });
+
+  test('require_named_nested_ends does not affect unnested unnamed ends', async () => {
+    const out = await syncNested(
+      '// @@@SNIPSTART u-one\na\n// @@@SNIPEND\n// @@@SNIPSTART u-two\nb\n// @@@SNIPEND\n',
+      ['u-one', 'u-two'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['u-one']).toBe(rendered('u-one', 'a'));
+    expect(out['u-two']).toBe(rendered('u-two', 'b'));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('nested snippets with named ends work without warnings, even in strict mode', async () => {
+    const out = await syncNested(
+      '// @@@SNIPSTART nn-outer\na\n// @@@SNIPSTART nn-inner\nb\n// @@@SNIPEND nn-inner\nc\n// @@@SNIPEND nn-outer\n',
+      ['nn-outer', 'nn-inner'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['nn-outer']).toBe(rendered('nn-outer', 'a\nb\nc'));
+    expect(out['nn-inner']).toBe(rendered('nn-inner', 'b'));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('overlapping snippets with named ends each get their own range', async () => {
+    const out = await syncNested(
+      '// @@@SNIPSTART ov-a\na\n// @@@SNIPSTART ov-b\nb\n// @@@SNIPEND ov-a\nc\n// @@@SNIPEND ov-b\n',
+      ['ov-a', 'ov-b']
+    );
+    expect(out['ov-a']).toBe(rendered('ov-a', 'a\nb'));
+    expect(out['ov-b']).toBe(rendered('ov-b', 'b\nc'));
+  });
+
+  test('three levels of nesting', async () => {
+    const out = await syncNested(
+      [
+        '// @@@SNIPSTART l1', '1',
+        '// @@@SNIPSTART l2', '2',
+        '// @@@SNIPSTART l3', '3',
+        '// @@@SNIPEND l3', '4',
+        '// @@@SNIPEND l2', '5',
+        '// @@@SNIPEND l1', '',
+      ].join('\n'),
+      ['l1', 'l2', 'l3']
+    );
+    expect(out.l1).toBe(rendered('l1', '1\n2\n3\n4\n5'));
+    expect(out.l2).toBe(rendered('l2', '2\n3\n4'));
+    expect(out.l3).toBe(rendered('l3', '3'));
+  });
+
+  test('trailing comment syntax after SNIPEND is not mistaken for a name', async () => {
+    const out = await syncNested(
+      '<!-- @@@SNIPSTART cc-outer -->\n<p>a</p>\n<!-- @@@SNIPSTART cc-inner -->\n<p>b</p>\n<!-- @@@SNIPEND cc-inner -->\n<!-- @@@SNIPEND -->\n',
+      ['cc-outer', 'cc-inner'],
+      { ext: 'html' }
+    );
+    expect(out['cc-outer']).toBe(rendered('cc-outer', '<p>a</p>\n<p>b</p>', 'html'));
+    expect(out['cc-inner']).toBe(rendered('cc-inner', '<p>b</p>', 'html'));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('a stray SNIPEND and an unterminated SNIPSTART warn without breaking other snippets', async () => {
+    const out = await syncNested(
+      '// @@@SNIPEND\n// @@@SNIPSTART st-ok\nok\n// @@@SNIPEND\n// @@@SNIPSTART st-open\nrest\n',
+      ['st-ok', 'st-open']
+    );
+    expect(out['st-ok']).toBe(rendered('st-ok', 'ok'));
+    expect(out['st-open']).toBe(rendered('st-open', 'rest'));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/nested-src\.go:1 has no matching/));
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/unterminated snippet "st-open"/));
+  });
+
+  test('an end marker sharing a line with the next start closes the previous snippet first', async () => {
+    const out = await syncNested(
+      '/* @@@SNIPSTART sl-first */\na\n/* @@@SNIPEND */ /* @@@SNIPSTART sl-second */\nb\n/* @@@SNIPEND */\n',
+      ['sl-first', 'sl-second'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['sl-first']).toBe(rendered('sl-first', 'a'));
+    expect(out['sl-second']).toBe(rendered('sl-second', 'b'));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('two named end markers on one line close both snippets', async () => {
+    const out = await syncNested(
+      '/* @@@SNIPSTART me-outer */\na\n/* @@@SNIPSTART me-inner */\nb\n/* @@@SNIPEND me-inner */ /* @@@SNIPEND me-outer */\nunrelated\n',
+      ['me-outer', 'me-inner'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['me-outer']).toBe(rendered('me-outer', 'a\nb'));
+    expect(out['me-inner']).toBe(rendered('me-inner', 'b'));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('an end-start-end line opens and closes the middle snippet', async () => {
+    const out = await syncNested(
+      '/* @@@SNIPSTART ese-first */\na\n/* @@@SNIPEND */ /* @@@SNIPSTART ese-mid */ /* @@@SNIPEND */\nunrelated\n',
+      ['ese-first', 'ese-mid'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['ese-first']).toBe(rendered('ese-first', 'a'));
+    expect(out['ese-mid']).toBe('<!--SNIPSTART ese-mid-->\n```go\n```\n<!--SNIPEND-->\n');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('markers in adjacent block comments are each recognized', async () => {
+    const out = await syncNested(
+      '/* @@@SNIPSTART ac-first */\na\n/* @@@SNIPEND *//*@@@SNIPSTART ac-second */\nb\n/* @@@SNIPEND ac-second */\n',
+      ['ac-first', 'ac-second'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['ac-first']).toBe(rendered('ac-first', 'a'));
+    expect(out['ac-second']).toBe(rendered('ac-second', 'b'));
+  });
+
+  test('named ends with an attached comment closer still match their snippet', async () => {
+    const out = await syncNested(
+      [
+        '/* @@@SNIPSTART cl-a */', 'a',
+        '/* @@@SNIPSTART cl-a-b */', 'b',
+        '/* @@@SNIPEND cl-a*/', 'c',
+        '/* @@@SNIPEND cl-a-b*/', '',
+      ].join('\n'),
+      ['cl-a', 'cl-a-b'],
+      { features: { require_named_nested_ends: true } }
+    );
+    // `cl-a*/` closes cl-a (not the innermost cl-a-b), so the ranges overlap.
+    expect(out['cl-a']).toBe(rendered('cl-a', 'a\nb'));
+    expect(out['cl-a-b']).toBe(rendered('cl-a-b', 'b\nc'));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('an HTML-style named end with an attached closer matches its snippet', async () => {
+    const out = await syncNested(
+      '<!-- @@@SNIPSTART hc-outer -->\n<p>a</p>\n<!-- @@@SNIPSTART hc-inner -->\n<p>b</p>\n<!-- @@@SNIPEND hc-inner-->\n<!-- @@@SNIPEND hc-outer-->\n',
+      ['hc-outer', 'hc-inner'],
+      { ext: 'html', features: { require_named_nested_ends: true } }
+    );
+    expect(out['hc-outer']).toBe(rendered('hc-outer', '<p>a</p>\n<p>b</p>', 'html'));
+    expect(out['hc-inner']).toBe(rendered('hc-inner', '<p>b</p>', 'html'));
+  });
+
+  test('a SNIPSTART with no identifier is an error', async () => {
+    const srcPath = `${testEnvPath}/no-id.go`;
+    fs.writeFileSync(srcPath, '// @@@SNIPSTART\na\n// @@@SNIPEND\n');
+    cfg.origins = localOrigin(srcPath);
+    const sync = new Sync(cfg, logger);
+    const repos = await sync.getRepos();
+    await expect(sync.extractSnippets(repos, [])).rejects.toThrow(/no-id\.go:1 has no snippet identifier/);
+  });
+
+  test('a start and end on one line produce an empty snippet without swallowing later lines', async () => {
+    const out = await syncNested(
+      '// @@@SNIPSTART se-outer\na\n// @@@SNIPSTART se-empty @@@SNIPEND se-empty\nb\n// @@@SNIPEND se-outer\n',
+      ['se-outer', 'se-empty']
+    );
+    expect(out['se-outer']).toBe(rendered('se-outer', 'a\nb'));
+    expect(out['se-empty']).toBe('<!--SNIPSTART se-empty-->\n```go\n```\n<!--SNIPEND-->\n');
+  });
+
+  test('an indented inner snippet is dedented on its own', async () => {
+    const out = await syncNested(
+      'func f() {\n\t// @@@SNIPSTART dd-outer\n\tif x {\n\t\t// @@@SNIPSTART dd-inner\n\t\ty()\n\t\t// @@@SNIPEND dd-inner\n\t}\n\t// @@@SNIPEND dd-outer\n}\n',
+      ['dd-outer', 'dd-inner'],
+      { features: { enable_code_dedenting: true } }
+    );
+    expect(out['dd-outer']).toBe(rendered('dd-outer', 'if x {\n\ty()\n}'));
+    expect(out['dd-inner']).toBe(rendered('dd-inner', 'y()'));
+  });
+});

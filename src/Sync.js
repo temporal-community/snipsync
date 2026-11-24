@@ -333,24 +333,55 @@ class Sync {
           if (rtype == "remote") {
             itemPath = join(extractRootPath, itemPath);
           }
-          let capture = false;
-          let fileSnipsCount = 0;
           const fileSnips = [];
+          // Snippets whose SNIPSTART has been seen but not yet their SNIPEND.
+          // Every non-marker line is captured into all of them, so snippets
+          // can nest (or, with named ends, overlap).
+          const open = [];
+          let lineNumber = 0;
+          // Errors thrown inside line-reader's per-line callback don't reliably
+          // reject the promise, so capture them, stop reading, and rethrow below.
+          let extractError = null;
           await eachLineAsync(itemPath, (line) => {
-            if (line.includes(readEnd)) {
-              capture = false;
-              fileSnipsCount++;
+            lineNumber++;
+            const markers = findReadMarkers(line);
+            if (markers.length === 0) {
+              for (const snip of open) {
+                snip.lines.push(line);
+              }
+              return;
             }
-            if (capture) {
-              fileSnips[fileSnipsCount].lines.push(line);
-            }
-            if (line.includes(readStart)) {
-              capture = true;
-              const id = extractReadID(line);
-              const snip = new Snippet(id, ext, owner, repo, ref, item);
-              fileSnips.push(snip);
+            // A marker line is never captured. A line may hold several markers
+            // (`/* @@@SNIPEND a */ /* @@@SNIPSTART b */`); apply each one in the
+            // order it appears, with its own identifier.
+            try {
+              for (const { isStart, token } of markers) {
+                if (isStart) {
+                  if (token === null) {
+                    throw new Error(
+                      `snipsync: ${readStart} at ${itemPath}:${lineNumber} has no snippet identifier.`
+                    );
+                  }
+                  const snip = new Snippet(token, ext, owner, repo, ref, item);
+                  fileSnips.push(snip);
+                  open.push(snip);
+                } else {
+                  this.closeSnippet(open, token, itemPath, lineNumber);
+                }
+              }
+            } catch (e) {
+              extractError = e;
+              return false; // stop reading this file
             }
           });
+          if (extractError) {
+            throw extractError;
+          }
+          for (const snip of open) {
+            this.logger.warn(
+              `snipsync: unterminated snippet "${snip.id}" in ${itemPath} (no ${readEnd} before EOF); capturing to end of file.`
+            );
+          }
           for (const snip of fileSnips) {
             trimTrailingBlankLines(snip.lines);
           }
@@ -360,6 +391,39 @@ class Sync {
       })
     );
     return snippets;
+  }
+  // closeSnippet removes the snippet a SNIPEND marker closes from `open`.
+  // A named end (`@@@SNIPEND <id>`) closes the open snippet with that id; an
+  // unnamed end closes the most recently opened one. An unnamed end while
+  // several snippets are open is ambiguous: it warns, or throws when
+  // features.require_named_nested_ends is set.
+  closeSnippet(open, endId, itemPath, lineNumber) {
+    if (open.length === 0) {
+      this.logger.warn(
+        `snipsync: ${readEnd} at ${itemPath}:${lineNumber} has no matching ${readStart}; ignoring.`
+      );
+      return;
+    }
+    const named = endId === null ? -1 : findNamedEnd(open, endId);
+    if (named !== -1) {
+      open.splice(named, 1);
+      return;
+    }
+    // Not a recognized name (absent, or trailing comment syntax such as `-->`):
+    // close the innermost snippet.
+    if (open.length > 1) {
+      const closing = open[open.length - 1].id;
+      const stillOpen = open.slice(0, -1).map((s) => `"${s.id}"`).join(", ");
+      const msg =
+        `snipsync: unnamed ${readEnd} at ${itemPath}:${lineNumber} inside nested snippets; ` +
+        `closing innermost "${closing}" (still open: ${stillOpen}). ` +
+        `Use "${readEnd} ${closing}" to make this explicit.`;
+      if (this.config.features && this.config.features.require_named_nested_ends) {
+        throw new Error(msg);
+      }
+      this.logger.warn(msg);
+    }
+    open.pop();
   }
   // getTargetFilesInfos identifies the paths to the target write files
   async getTargetFilesInfos() {
@@ -640,9 +704,11 @@ function escapeStringRegexp(string) {
   return string.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&").replace(/-/g, "\\x2d");
 }
 
-const readMatchRegexp = new RegExp(
-  escapeStringRegexp(readStart) + /\s+(\S+)/.source
-);
+// Matches each source marker on a line, plus the token after it (if any). The
+// token stops before any embedded marker, so `@@@SNIPEND @@@SNIPSTART x` and
+// `/* @@@SNIPEND *//*@@@SNIPSTART x */` are each two markers.
+const readMarkers = `${escapeStringRegexp(readStart)}|${escapeStringRegexp(readEnd)}`;
+const readMarkerRegexp = new RegExp(`(${readMarkers})(?:\\s+((?:(?!${readMarkers})\\S)+))?`, "g");
 
 
 // Build an opening marker regex for a given style.
@@ -688,10 +754,37 @@ function endStyleIdx(line) {
 }
 
 
-// extractReadID uses regex to exract the id from a string
-function extractReadID(line) {
-  const matches = line.match(readMatchRegexp);
-  return matches[1];
+// findReadMarkers returns every SNIPSTART/SNIPEND marker on a line, in order,
+// with the token that follows it (or null). For a start the token is the
+// snippet id. For an end it may be an id or just trailing comment syntax
+// (`-->`); closeSnippet only treats it as a name if it matches an open snippet.
+function findReadMarkers(line) {
+  return [...line.matchAll(readMarkerRegexp)].map((m) => ({
+    isStart: m[1] === readStart,
+    token: m[2] === undefined ? null : m[2],
+  }));
+}
+
+// findNamedEnd returns the index in `open` of the snippet a SNIPEND token
+// names, or -1. The token names a snippet if it is that snippet's id, or the id
+// followed directly by comment-closing punctuation (`inner*/`, `inner-->`).
+// An exact match wins; otherwise the longest such id; ties go to the innermost.
+function findNamedEnd(open, token) {
+  let best = -1;
+  for (let i = open.length - 1; i >= 0; i--) {
+    const id = open[i].id;
+    if (id === token) {
+      return i;
+    }
+    if (
+      token.startsWith(id) &&
+      /^[^A-Za-z0-9_]+$/.test(token.slice(id.length)) &&
+      (best === -1 || id.length > open[best].id.length)
+    ) {
+      best = i;
+    }
+  }
+  return best;
 }
 
 // overwriteConfig uses values if provided in the snippet placeholder

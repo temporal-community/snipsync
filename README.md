@@ -40,6 +40,8 @@ If the `allowed_target_extensions` key in `features` is not specified, then it d
 
 The `enable_code_dedenting` key in `features` lets you remove leading spaces from indented code snippets. This is handy when you're including a snippet of code within a class or function and don't want to include the leading indentation. This is `false` by default. 
 
+The `require_named_nested_ends` key in `features` makes an unnamed `@@@SNIPEND` inside [nested snippets](#nested-snippets) a hard error instead of a warning, so the run fails before any files are written. This is `false` by default.
+
 Example of a complete `snipsync.config.yaml`:
 
 ```yaml
@@ -64,6 +66,7 @@ features:
   enable_code_block: false
   allowed_target_extensions: [.md]
   enable_code_dedenting: false
+  require_named_nested_ends: true
 ```
 
 Example of a bare minimum snipsync.config.yaml:
@@ -95,6 +98,24 @@ func HelloUniverse() {
 In the example above, "hellouniverse" is the unique identifier for the code snippet.
 
 Unique identifiers can contain letters, numbers, hyphens, and underscores.
+
+#### Nested snippets
+
+Snippets can be nested, so one page can show a whole sample and another page can show just part of it. Each snippet gets every line between its own start and end markers. Marker lines are never included, so the outer snippet doesn't show the inner snippet's comments.
+
+```go
+// @@@SNIPSTART hellouniverse-full
+func HelloUniverse() {
+	// @@@SNIPSTART hellouniverse-print
+	fmt.Println("Hello Universe!")
+	// @@@SNIPEND hellouniverse-print
+}
+// @@@SNIPEND hellouniverse-full
+```
+
+Here `hellouniverse-full` is the whole function and `hellouniverse-print` is only the `fmt.Println` line.
+
+You can put the snippet's identifier after `@@@SNIPEND`. It's optional, but use it whenever snippets nest. A named end closes the snippet with that identifier, which also lets snippets overlap without being strictly nested. An unnamed `@@@SNIPEND` closes the most recently opened snippet. If other snippets are still open at that point, snipsync logs a warning because the end is ambiguous; set `require_named_nested_ends` to make it an error instead.
 
 ### Target files
 
