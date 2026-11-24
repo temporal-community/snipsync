@@ -978,6 +978,33 @@ describe('nested snippets', () => {
     expect(out['ac-second']).toBe(rendered('ac-second', 'b'));
   });
 
+  test('named ends with an attached comment closer still match their snippet', async () => {
+    const out = await syncNested(
+      [
+        '/* @@@SNIPSTART cl-a */', 'a',
+        '/* @@@SNIPSTART cl-a-b */', 'b',
+        '/* @@@SNIPEND cl-a*/', 'c',
+        '/* @@@SNIPEND cl-a-b*/', '',
+      ].join('\n'),
+      ['cl-a', 'cl-a-b'],
+      { features: { require_named_nested_ends: true } }
+    );
+    // `cl-a*/` closes cl-a (not the innermost cl-a-b), so the ranges overlap.
+    expect(out['cl-a']).toBe(rendered('cl-a', 'a\nb'));
+    expect(out['cl-a-b']).toBe(rendered('cl-a-b', 'b\nc'));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('an HTML-style named end with an attached closer matches its snippet', async () => {
+    const out = await syncNested(
+      '<!-- @@@SNIPSTART hc-outer -->\n<p>a</p>\n<!-- @@@SNIPSTART hc-inner -->\n<p>b</p>\n<!-- @@@SNIPEND hc-inner-->\n<!-- @@@SNIPEND hc-outer-->\n',
+      ['hc-outer', 'hc-inner'],
+      { ext: 'html', features: { require_named_nested_ends: true } }
+    );
+    expect(out['hc-outer']).toBe(rendered('hc-outer', '<p>a</p>\n<p>b</p>', 'html'));
+    expect(out['hc-inner']).toBe(rendered('hc-inner', '<p>b</p>', 'html'));
+  });
+
   test('a SNIPSTART with no identifier is an error', async () => {
     const srcPath = `${testEnvPath}/no-id.go`;
     fs.writeFileSync(srcPath, '// @@@SNIPSTART\na\n// @@@SNIPEND\n');

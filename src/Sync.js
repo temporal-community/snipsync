@@ -404,13 +404,10 @@ class Sync {
       );
       return;
     }
-    if (endId !== null) {
-      for (let i = open.length - 1; i >= 0; i--) {
-        if (open[i].id === endId) {
-          open.splice(i, 1);
-          return;
-        }
-      }
+    const named = endId === null ? -1 : findNamedEnd(open, endId);
+    if (named !== -1) {
+      open.splice(named, 1);
+      return;
     }
     // Not a recognized name (absent, or trailing comment syntax such as `-->`):
     // close the innermost snippet.
@@ -766,6 +763,28 @@ function findReadMarkers(line) {
     isStart: m[1] === readStart,
     token: m[2] === undefined ? null : m[2],
   }));
+}
+
+// findNamedEnd returns the index in `open` of the snippet a SNIPEND token
+// names, or -1. The token names a snippet if it is that snippet's id, or the id
+// followed directly by comment-closing punctuation (`inner*/`, `inner-->`).
+// An exact match wins; otherwise the longest such id; ties go to the innermost.
+function findNamedEnd(open, token) {
+  let best = -1;
+  for (let i = open.length - 1; i >= 0; i--) {
+    const id = open[i].id;
+    if (id === token) {
+      return i;
+    }
+    if (
+      token.startsWith(id) &&
+      /^[^A-Za-z0-9_]+$/.test(token.slice(id.length)) &&
+      (best === -1 || id.length > open[best].id.length)
+    ) {
+      best = i;
+    }
+  }
+  return best;
 }
 
 // overwriteConfig uses values if provided in the snippet placeholder
