@@ -27,3 +27,9 @@ test('Sets allowed_target_extensions to empty array when not defined', async() =
   const cfg = readConfig(logger, configFile);
   expect(cfg.features.allowed_target_extensions).toEqual([]);
 });
+
+test('Sets require_named_nested_ends to false when not defined', async() => {
+  const configFile = 'test/fixtures/docsync-config-min.yaml';
+  const cfg = readConfig(logger, configFile);
+  expect(cfg.features.require_named_nested_ends).toBe(false);
+});

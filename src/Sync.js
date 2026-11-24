@@ -328,24 +328,45 @@ class Sync {
           if (rtype == "remote") {
             itemPath = join(extractRootPath, itemPath);
           }
-          let capture = false;
-          let fileSnipsCount = 0;
           const fileSnips = [];
+          // Snippets whose SNIPSTART has been seen but not yet their SNIPEND.
+          // Every non-marker line is captured into all of them, so snippets
+          // can nest (or, with named ends, overlap).
+          const open = [];
+          let lineNumber = 0;
+          // Errors thrown inside line-reader's per-line callback don't reliably
+          // reject the promise, so capture them, stop reading, and rethrow below.
+          let extractError = null;
           await eachLineAsync(itemPath, (line) => {
-            if (line.includes(readEnd)) {
-              capture = false;
-              fileSnipsCount++;
-            }
-            if (capture) {
-              fileSnips[fileSnipsCount].lines.push(line);
-            }
+            lineNumber++;
             if (line.includes(readStart)) {
-              capture = true;
               const id = extractReadID(line);
               const snip = new Snippet(id, ext, owner, repo, ref, item);
               fileSnips.push(snip);
+              open.push(snip);
+              return;
+            }
+            if (line.includes(readEnd)) {
+              try {
+                this.closeSnippet(open, extractEndID(line), itemPath, lineNumber);
+              } catch (e) {
+                extractError = e;
+                return false; // stop reading this file
+              }
+              return;
+            }
+            for (const snip of open) {
+              snip.lines.push(line);
             }
           });
+          if (extractError) {
+            throw extractError;
+          }
+          for (const snip of open) {
+            this.logger.warn(
+              `snipsync: unterminated snippet "${snip.id}" in ${itemPath} (no ${readEnd} before EOF); capturing to end of file.`
+            );
+          }
           for (const snip of fileSnips) {
             trimTrailingBlankLines(snip.lines);
           }
@@ -355,6 +376,42 @@ class Sync {
       })
     );
     return snippets;
+  }
+  // closeSnippet removes the snippet a SNIPEND marker closes from `open`.
+  // A named end (`@@@SNIPEND <id>`) closes the open snippet with that id; an
+  // unnamed end closes the most recently opened one. An unnamed end while
+  // several snippets are open is ambiguous: it warns, or throws when
+  // features.require_named_nested_ends is set.
+  closeSnippet(open, endId, itemPath, lineNumber) {
+    if (open.length === 0) {
+      this.logger.warn(
+        `snipsync: ${readEnd} at ${itemPath}:${lineNumber} has no matching ${readStart}; ignoring.`
+      );
+      return;
+    }
+    if (endId !== null) {
+      for (let i = open.length - 1; i >= 0; i--) {
+        if (open[i].id === endId) {
+          open.splice(i, 1);
+          return;
+        }
+      }
+    }
+    // Not a recognized name (absent, or trailing comment syntax such as `-->`):
+    // close the innermost snippet.
+    if (open.length > 1) {
+      const closing = open[open.length - 1].id;
+      const stillOpen = open.slice(0, -1).map((s) => `"${s.id}"`).join(", ");
+      const msg =
+        `snipsync: unnamed ${readEnd} at ${itemPath}:${lineNumber} inside nested snippets; ` +
+        `closing innermost "${closing}" (still open: ${stillOpen}). ` +
+        `Use "${readEnd} ${closing}" to make this explicit.`;
+      if (this.config.features && this.config.features.require_named_nested_ends) {
+        throw new Error(msg);
+      }
+      this.logger.warn(msg);
+    }
+    open.pop();
   }
   // getTargetFilesInfos identifies the paths to the target write files
   async getTargetFilesInfos() {
@@ -639,6 +696,10 @@ const readMatchRegexp = new RegExp(
   escapeStringRegexp(readStart) + /\s+(\S+)/.source
 );
 
+const readEndMatchRegexp = new RegExp(
+  escapeStringRegexp(readEnd) + /\s+(\S+)/.source
+);
+
 
 // Build an opening marker regex for a given style.
 function buildWriteStartRegexp(style) {
@@ -687,6 +748,14 @@ function endStyleIdx(line) {
 function extractReadID(line) {
   const matches = line.match(readMatchRegexp);
   return matches[1];
+}
+
+// extractEndID returns the token after a SNIPEND marker, or null if there is
+// none. The token may be a snippet id or just trailing comment syntax (`-->`);
+// closeSnippet only treats it as a name if it matches an open snippet.
+function extractEndID(line) {
+  const matches = line.match(readEndMatchRegexp);
+  return matches ? matches[1] : null;
 }
 
 // overwriteConfig uses values if provided in the snippet placeholder

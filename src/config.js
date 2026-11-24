@@ -40,5 +40,11 @@ module.exports.readConfig = (logger, file="") => {
     cfg['features']['enable_code_dedenting'] = true;
   }
 
+  // Unnamed SNIPEND markers inside nested snippets only warn by default;
+  // set this to make them a hard error.
+  if (!Object.prototype.hasOwnProperty.call(cfg.features, 'require_named_nested_ends')) {
+    cfg['features']['require_named_nested_ends'] = false;
+  }
+
   return cfg;
 };
