@@ -344,32 +344,29 @@ class Sync {
           let extractError = null;
           await eachLineAsync(itemPath, (line) => {
             lineNumber++;
-            const startIdx = line.indexOf(readStart);
-            const endIdx = line.indexOf(readEnd);
-            if (startIdx === -1 && endIdx === -1) {
+            const markers = findReadMarkers(line);
+            if (markers.length === 0) {
               for (const snip of open) {
                 snip.lines.push(line);
               }
               return;
             }
-            const openSnippet = () => {
-              const snip = new Snippet(extractReadID(line), ext, owner, repo, ref, item);
-              fileSnips.push(snip);
-              open.push(snip);
-            };
-            // A marker line is never captured. If one line has both an end and
-            // a start (`/* @@@SNIPEND */ /* @@@SNIPSTART next */`), apply them
-            // in the order they appear so the end closes the previous snippet.
+            // A marker line is never captured. A line may hold several markers
+            // (`/* @@@SNIPEND a */ /* @@@SNIPSTART b */`); apply each one in the
+            // order it appears, with its own identifier.
             try {
-              if (endIdx !== -1 && (startIdx === -1 || endIdx < startIdx)) {
-                this.closeSnippet(open, extractEndID(line), itemPath, lineNumber);
-                if (startIdx !== -1) {
-                  openSnippet();
-                }
-              } else {
-                openSnippet();
-                if (endIdx !== -1) {
-                  this.closeSnippet(open, extractEndID(line), itemPath, lineNumber);
+              for (const { isStart, token } of markers) {
+                if (isStart) {
+                  if (token === null) {
+                    throw new Error(
+                      `snipsync: ${readStart} at ${itemPath}:${lineNumber} has no snippet identifier.`
+                    );
+                  }
+                  const snip = new Snippet(token, ext, owner, repo, ref, item);
+                  fileSnips.push(snip);
+                  open.push(snip);
+                } else {
+                  this.closeSnippet(open, token, itemPath, lineNumber);
                 }
               }
             } catch (e) {
@@ -710,13 +707,10 @@ function escapeStringRegexp(string) {
   return string.replace(/[|\\{}()[\]^$+*?.]/g, "\\$&").replace(/-/g, "\\x2d");
 }
 
-const readMatchRegexp = new RegExp(
-  escapeStringRegexp(readStart) + /\s+(\S+)/.source
-);
-
-const readEndMatchRegexp = new RegExp(
-  escapeStringRegexp(readEnd) + /\s+(\S+)/.source
-);
+// Matches each source marker on a line, plus the token after it (if any). The
+// token can't itself be a marker, so `@@@SNIPEND @@@SNIPSTART x` is two markers.
+const readMarkers = `${escapeStringRegexp(readStart)}|${escapeStringRegexp(readEnd)}`;
+const readMarkerRegexp = new RegExp(`(${readMarkers})(?:\\s+((?!${readMarkers})\\S+))?`, "g");
 
 
 // Build an opening marker regex for a given style.
@@ -762,18 +756,15 @@ function endStyleIdx(line) {
 }
 
 
-// extractReadID uses regex to exract the id from a string
-function extractReadID(line) {
-  const matches = line.match(readMatchRegexp);
-  return matches[1];
-}
-
-// extractEndID returns the token after a SNIPEND marker, or null if there is
-// none. The token may be a snippet id or just trailing comment syntax (`-->`);
-// closeSnippet only treats it as a name if it matches an open snippet.
-function extractEndID(line) {
-  const matches = line.match(readEndMatchRegexp);
-  return matches ? matches[1] : null;
+// findReadMarkers returns every SNIPSTART/SNIPEND marker on a line, in order,
+// with the token that follows it (or null). For a start the token is the
+// snippet id. For an end it may be an id or just trailing comment syntax
+// (`-->`); closeSnippet only treats it as a name if it matches an open snippet.
+function findReadMarkers(line) {
+  return [...line.matchAll(readMarkerRegexp)].map((m) => ({
+    isStart: m[1] === readStart,
+    token: m[2] === undefined ? null : m[2],
+  }));
 }
 
 // overwriteConfig uses values if provided in the snippet placeholder

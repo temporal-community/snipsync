@@ -946,6 +946,37 @@ describe('nested snippets', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  test('two named end markers on one line close both snippets', async () => {
+    const out = await syncNested(
+      '/* @@@SNIPSTART me-outer */\na\n/* @@@SNIPSTART me-inner */\nb\n/* @@@SNIPEND me-inner */ /* @@@SNIPEND me-outer */\nunrelated\n',
+      ['me-outer', 'me-inner'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['me-outer']).toBe(rendered('me-outer', 'a\nb'));
+    expect(out['me-inner']).toBe(rendered('me-inner', 'b'));
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('an end-start-end line opens and closes the middle snippet', async () => {
+    const out = await syncNested(
+      '/* @@@SNIPSTART ese-first */\na\n/* @@@SNIPEND */ /* @@@SNIPSTART ese-mid */ /* @@@SNIPEND */\nunrelated\n',
+      ['ese-first', 'ese-mid'],
+      { features: { require_named_nested_ends: true } }
+    );
+    expect(out['ese-first']).toBe(rendered('ese-first', 'a'));
+    expect(out['ese-mid']).toBe('<!--SNIPSTART ese-mid-->\n```go\n```\n<!--SNIPEND-->\n');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  test('a SNIPSTART with no identifier is an error', async () => {
+    const srcPath = `${testEnvPath}/no-id.go`;
+    fs.writeFileSync(srcPath, '// @@@SNIPSTART\na\n// @@@SNIPEND\n');
+    cfg.origins = localOrigin(srcPath);
+    const sync = new Sync(cfg, logger);
+    const repos = await sync.getRepos();
+    await expect(sync.extractSnippets(repos, [])).rejects.toThrow(/no-id\.go:1 has no snippet identifier/);
+  });
+
   test('a start and end on one line produce an empty snippet without swallowing later lines', async () => {
     const out = await syncNested(
       '// @@@SNIPSTART se-outer\na\n// @@@SNIPSTART se-empty @@@SNIPEND se-empty\nb\n// @@@SNIPEND se-outer\n',
